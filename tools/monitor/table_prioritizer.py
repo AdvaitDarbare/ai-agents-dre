@@ -1,7 +1,5 @@
-"""
 Table Prioritizer Tool
 Prioritizes tables by downstream impact using lineage and usage metrics.
-Inspired by Databricks' Unity Catalog prioritization.
 """
 import sqlite3
 from datetime import datetime, timedelta

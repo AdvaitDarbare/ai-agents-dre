@@ -1,7 +1,6 @@
 """
 Seasonal Detector Tool
 Learns historical patterns and seasonal behaviors to intelligently detect anomalies.
-Inspired by Databricks' Agentic Data Quality Monitoring.
 """
 import sqlite3
 from datetime import datetime, timedelta
@@ -13,7 +12,7 @@ class SeasonalDetector:
     """
     Learns normal data patterns including seasonal variations.
     
-    Key Databricks-inspired features:
+    Key features:
     - Learns day-of-week patterns (e.g., dips on weekends)
     - Learns monthly patterns (e.g., tax season spikes)
     - Adapts thresholds based on historical variance

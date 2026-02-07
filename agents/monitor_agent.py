@@ -14,10 +14,10 @@ This agent follows a Short-Circuit Decision Tree:
 3. Schema Validation → CRITICAL STOP if missing critical columns
 4. Statistical Profiling → Adaptive outlier detection
 5. Drift Detection → WARN if deviation > 30%
-6. Quality Metrics → Comprehensive health assessment (Databricks-inspired)
+6. Quality Metrics → Comprehensive health assessment
 7. Final Verdict → Structured JSON report with health indicator
 
-Enhanced with Databricks-inspired features:
+Enhanced with Advanced features:
 - Learned behavior (seasonal patterns) vs static rules
 - Intelligent scanning prioritization by table importance
 - Comprehensive quality metrics (freshness, completeness, validity, uniqueness)
@@ -40,7 +40,7 @@ from tools.monitor import (
     DriftCheckTool
 )
 
-# Enhanced tools (Databricks-inspired)
+# Enhanced tools
 from tools.monitor import (
     SeasonalDetector,
     TablePrioritizer,
@@ -63,7 +63,7 @@ class MonitorAgent:
     - Aware: Checks historical drift AND learned seasonal behaviors
     - Tolerant: Distinguishes between "Stop the pipeline" and "Send an alert"
     
-    Enhanced with Databricks-inspired capabilities:
+    Enhanced with Advanced capabilities:
     - Table prioritization by downstream impact
     - Seasonal pattern learning (day-of-week, monthly)
     - Comprehensive quality metrics
@@ -80,7 +80,7 @@ class MonitorAgent:
         self.stats_analysis_tool = StatsAnalysisTool()
         self.drift_check_tool = DriftCheckTool()
         
-        # Enhanced tools (Databricks-inspired)
+        # Enhanced tools
         self.seasonal_detector = SeasonalDetector()
         self.table_prioritizer = TablePrioritizer()
         self.quality_metrics_tool = QualityMetricsTool()
@@ -262,7 +262,16 @@ class MonitorAgent:
         
         # STEP 3.5: Multi-Table Consistency Check (Referential Integrity)
         print("\nStep 3.5/5: Consistency Check (Referential Integrity)...")
-        consistency_result = self.consistency_check_tool.run(df, table_name)
+        
+        # Load contract object for FK validation
+        contract_dict = None
+        if active_contract_yaml:
+            try:
+                contract_dict = yaml.safe_load(active_contract_yaml)
+            except:
+                pass
+
+        consistency_result = self.consistency_check_tool.run(df, table_name, contract=contract_dict)
         self._log_step("ConsistencyCheckTool", consistency_result)
         
         if consistency_result.get('status') == 'FAIL':
@@ -313,6 +322,26 @@ class MonitorAgent:
             column_stats=stats_result['profiles']
         )
         
+        # STEP 5.5: Seasonal Anomaly Detection
+        print("\nStep 5.5/5: Seasonal Anomaly Detection...")
+        seasonal_analysis = {}
+        # Check row count seasonality
+        row_count_anomaly = self.seasonal_detector.check_anomaly(
+            table_name, "row_count", len(df)
+        )
+        seasonal_analysis["row_count"] = row_count_anomaly
+        
+        if row_count_anomaly['is_anomaly']:
+            print(f"  ⚠️  Seasonal Anomaly: {row_count_anomaly['context']}")
+            
+        # Online Learning: Update patterns if data is fundamentally valid
+        # We only learn if schema validation passed to avoid poisoning the model with garbage
+        if schema_result['decision'] != 'CRITICAL_STOP': 
+             self.seasonal_detector.learn_patterns(table_name, "row_count", [{
+                 "timestamp": datetime.now().isoformat(),
+                 "value": len(df)
+             }])
+        
         # STEP 6: Final Verdict
         print(f"\n{'='*60}")
         print("📊 FINAL VERDICT")
@@ -320,6 +349,10 @@ class MonitorAgent:
         
         # Collect all warnings
         warnings = []
+        
+        # Seasonal warnings
+        if seasonal_analysis.get('row_count', {}).get('is_anomaly'):
+             warnings.append(f"Seasonal Anomaly: {seasonal_analysis['row_count']['context']}")
         
         # Schema warnings
         for violation in schema_result.get('violations', []):
@@ -359,7 +392,9 @@ class MonitorAgent:
             df=df,
             table_name=table_name,
             suggested_updates=suggested_updates,
-            active_contract=active_contract_yaml
+            active_contract=active_contract_yaml,
+            seasonal_analysis=seasonal_analysis,
+            consistency_result=consistency_result
         )
     
     def _log_step(self, tool_name: str, result: Dict[str, Any]):
@@ -377,16 +412,18 @@ class MonitorAgent:
                                df=None, table_name: str = "default",
                                suggested_updates: List[Dict] = None,
                                inferred_contract: str = None,
-                               active_contract: str = None) -> Dict[str, Any]:
+                               active_contract: str = None,
+                               seasonal_analysis: Dict = None,
+                               consistency_result: Dict = None) -> Dict[str, Any]:
         """
         Generate the final structured JSON report.
         
         This is the "Handover" format for the Diagnoser Agent.
-        Enhanced with Databricks-inspired metrics.
+        Enhanced with Advanced metrics.
         """
         execution_time = (datetime.now() - self.start_time).total_seconds()
         
-        # Calculate quality metrics if DataFrame is available (Databricks-inspired)
+        # Calculate quality metrics if DataFrame is available
         quality_metrics = None
         health_result = None
         if df is not None:
@@ -420,7 +457,7 @@ class MonitorAgent:
                 "timestamp": datetime.now().isoformat()
             }
         
-        # Get table priority information (Databricks-inspired)
+        # Get table priority information
         table_priority = self.table_prioritizer.get_priority(table_name)
         
         report = {
@@ -435,10 +472,12 @@ class MonitorAgent:
             "quarantine_indices": quarantine_indices[:100],  # Limit to first 100
             "execution_log": self.execution_log,
             
-            # Databricks-inspired additions
+            # Advanced additions
             "quality_metrics": quality_metrics,
             "health_indicator": health_result,
             "table_priority": table_priority,
+            "seasonal_analysis": seasonal_analysis,
+            "consistency_result": consistency_result,
             
             # Evolution Suggestion
             "schema_evolution": {
@@ -475,12 +514,12 @@ class MonitorAgent:
         if quarantine_indices:
             print(f"\n🔒 Quarantined {len(quarantine_indices)} rows (outliers)")
         
-        # Print health indicator (Databricks-inspired)
+        # Print health indicator
         if health_result:
             print(f"\n{health_result['badge']} HEALTH INDICATOR: {health_result['status']} ({health_result['score']}/100)")
             print(f"   Safe to use: {'Yes' if health_result['safe_to_use'] else 'No'}")
         
-        # Print quality metrics summary (Databricks-inspired)
+        # Print quality metrics summary
         if quality_metrics:
             print(f"\n📊 QUALITY METRICS:")
             print(f"   Freshness:    {quality_metrics['metrics']['freshness']['status']}")
@@ -488,7 +527,7 @@ class MonitorAgent:
             print(f"   Validity:     {quality_metrics['metrics']['validity']['score']:.1f}%")
             print(f"   Uniqueness:   {quality_metrics['metrics']['uniqueness']['score']:.1f}%")
         
-        # Print table priority (Databricks-inspired)
+        # Print table priority
         if table_priority.get('priority_tier') != 'UNKNOWN':
             print(f"\n🎯 TABLE PRIORITY: {table_priority['priority_tier']} (score: {table_priority['priority_score']})")
         

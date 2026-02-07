@@ -5,8 +5,6 @@ Provides consistent health signals across the platform.
 Architecture:
 - Math-based scoring: Deterministic, fast, safe (for critical decisions)
 - LLM-based insights: Contextual, intelligent (for recommendations)
-
-Inspired by Databricks' unified health indicator.
 """
 from typing import Dict, Any, List, Optional
 from datetime import datetime

@@ -7,7 +7,7 @@ from .schema_validator_tool import SchemaValidatorTool
 from .stats_analysis_tool import StatsAnalysisTool
 from .drift_check_tool import DriftCheckTool
 
-# Enhanced tools (Databricks-inspired)
+# Enhanced tools
 from .seasonal_detector import SeasonalDetector
 from .table_prioritizer import TablePrioritizer
 from .quality_metrics_tool import QualityMetricsTool

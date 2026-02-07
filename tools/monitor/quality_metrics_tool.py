@@ -1,7 +1,7 @@
 """
 Quality Metrics Tool
 Enhanced data profiling with comprehensive quality signals.
-Inspired by Databricks' quality metrics: freshness, completeness, validity, uniqueness.
+Includes metrics: freshness, completeness, validity, uniqueness.
 """
 import pandas as pd
 import numpy as np

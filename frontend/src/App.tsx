@@ -110,6 +110,23 @@ interface TablePriority {
   context: string;
 }
 
+interface SeasonalAnalysis {
+  row_count?: {
+    is_anomaly: boolean;
+    context: string;
+    expected_range?: number[];
+    deviation_sigma?: number;
+  };
+}
+
+interface ConsistencyResult {
+  status: string;
+  relationship?: string;
+  orphan_count?: number;
+  orphan_pct?: number;
+  sample_orphans?: any[];
+}
+
 interface Report {
   file: string;
   report_filename: string;
@@ -121,6 +138,8 @@ interface Report {
   quality_metrics?: QualityMetrics;
   health_indicator?: HealthIndicator;
   table_priority?: TablePriority;
+  seasonal_analysis?: SeasonalAnalysis;
+  consistency_result?: ConsistencyResult;
   table_name: string;
   inferred_contract?: string;
   active_contract?: string;
@@ -397,6 +416,60 @@ function App() {
           <Card decoration="top" decorationColor={report.health_indicator.risk_assessment === 'Low' ? 'emerald' : 'amber'}>
             <Text>Risk Level</Text>
             <Metric>{report.health_indicator.risk_assessment}</Metric>
+          </Card>
+        )}
+      </Grid>
+
+      {/* ADVANCED INSIGHTS */}
+      <Grid numItems={1} numItemsLg={2} className="gap-6 mb-8">
+
+        {/* Seasonality Card */}
+        {report.seasonal_analysis && (
+          <Card>
+            <Title>Seasonal Context</Title>
+            <Flex className="mt-4">
+              <Text>Row Count Analysis</Text>
+              <Badge color={report.seasonal_analysis.row_count?.is_anomaly ? 'rose' : 'emerald'}>
+                {report.seasonal_analysis.row_count?.is_anomaly ? 'Anomaly' : 'Normal'}
+              </Badge>
+            </Flex>
+            <Text className="mt-2 text-sm text-slate-500">
+              {report.seasonal_analysis.row_count?.context}
+            </Text>
+            {report.seasonal_analysis.row_count?.expected_range && (
+              <Text className="mt-1 text-xs text-slate-400 font-mono">
+                Expected Range: {report.seasonal_analysis.row_count.expected_range[0]} - {report.seasonal_analysis.row_count.expected_range[1]}
+              </Text>
+            )}
+          </Card>
+        )}
+
+        {/* Consistency Check Card */}
+        {report.consistency_result && (
+          <Card>
+            <Title>Relationships & Integrity</Title>
+            <Flex className="mt-4">
+              <Text>{report.consistency_result.relationship || "No Relationships Defined"}</Text>
+              <Badge color={report.consistency_result.status === 'FAIL' ? 'rose' : (report.consistency_result.status === 'SKIPPED' ? 'slate' : 'emerald')}>
+                {report.consistency_result.status}
+              </Badge>
+            </Flex>
+            {report.consistency_result.status === 'FAIL' && (
+              <div className="mt-2 p-2 bg-rose-50 rounded text-sm text-rose-700">
+                <Text className="font-bold">Orphans Found: {report.consistency_result.orphan_count}</Text>
+                <Text>Sample IDs: {JSON.stringify(report.consistency_result.sample_orphans)}</Text>
+              </div>
+            )}
+            {report.consistency_result.status === 'SKIPPED' && (
+              <Text className="mt-2 text-sm text-slate-400 italic">
+                No foreign keys found in contract.
+              </Text>
+            )}
+            {report.consistency_result.status === 'PASS' && (
+              <Text className="mt-2 text-sm text-emerald-600">
+                All foreign keys validated successfully.
+              </Text>
+            )}
           </Card>
         )}
       </Grid>
