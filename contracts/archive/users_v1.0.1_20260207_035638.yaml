@@ -1,0 +1,24 @@
+dataContractSpecification: 3.1.0
+id: urn:datacontract:users
+strictMode: true
+info:
+  title: Users Data Contract
+  version: 1.0.1
+  owner: user-management-team
+schema:
+  - name: users
+    physicalType: table
+    properties:
+      - name: user_id
+        physicalType: int64
+        required: true
+        quality:
+          - metric: unique
+            mustBe: true
+            severity: critical
+      - name: email
+        physicalType: string
+        quality:
+          - metric: unique
+            mustBe: true
+            severity: warning

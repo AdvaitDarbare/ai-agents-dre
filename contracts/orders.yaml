@@ -1,0 +1,33 @@
+dataContractSpecification: 3.1.0
+id: urn:datacontract:orders
+info:
+  title: Draft Contract for orders
+  version: 1.0.0
+  status: draft
+  owner: data-team
+strictMode: false
+schema:
+- name: orders
+  physicalType: table
+  properties:
+  - name: order_id
+    physicalType: int64
+    quality:
+    - metric: unique
+      mustBe: true
+      severity: critical
+    required: true
+  - name: amount
+    physicalType: float64
+    quality:
+    - metric: unique
+      mustBe: true
+      severity: critical
+    required: true
+  - name: date
+    physicalType: string
+    quality: []
+    required: false
+quality:
+- metric: freshness
+  threshold: 24h
