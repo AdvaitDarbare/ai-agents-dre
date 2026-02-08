@@ -1,0 +1,61 @@
+# ODCS v3.1.0 Contract - Transactions Dataset
+# Schema validation contract for Apache Doris pre-load checks
+
+# Dataset Information
+kind: DataContract
+apiVersion: v3.1.0
+id: urn:datacontract:transactions
+info:
+  title: Transactions Dataset
+  version: 1.0.0
+  description: Transaction records for data quality validation before loading into Apache Doris
+  owner: Data Engineering Team
+  domain: payments
+
+# Table Configuration
+table_name: transactions
+description: Transactions schema contract for data quality validation
+
+# Data Quality Rules
+quality:
+  min_rows: 10      # Minimum expected row count
+  max_rows: 100000  # Maximum expected row count
+  
+  # Custom Consistency Rules (Business Logic)
+  custom_checks:
+    - name: "No Future Transactions"
+      sql_condition: "timestamp <= now()"
+      severity: error
+    - name: "High Value Flag Check"
+      sql_condition: "amount < 5000 OR (amount >= 5000 AND status = 'completed')"
+      severity: error
+
+# Schema Definition - Column Specifications
+columns:
+  - name: transaction_id
+    data_type: varchar
+    nullable: false
+    description: Unique transaction identifier
+    isPrimaryKey: true
+    
+  - name: user_id
+    data_type: varchar
+    nullable: false
+    description: User identifier who initiated the transaction
+    
+  - name: amount
+    data_type: double
+    nullable: false
+    description: Transaction amount in USD
+    min_value: 0.0     # Amount must be positive
+    max_value: 10000.0 # Maximum transaction amount
+    
+  - name: timestamp
+    data_type: timestamp
+    nullable: false
+    description: Transaction timestamp (when transaction occurred)
+    
+  - name: status
+    data_type: varchar
+    nullable: false
+    description: Transaction status (completed, pending, failed, refunded)

@@ -1,0 +1,6 @@
+transaction_id,user_id,amount,timestamp,status
+TXN001,USER001,100.0,2024-01-01 10:00:00,completed
+TXN002,USER002,100.0,2024-01-01 10:00:00,completed
+TXN003,USER003,100.0,2024-01-01 10:00:00,completed
+TXN001,USER004,100.0,2024-01-01 10:00:00,completed
+TXN002,USER005,100.0,2024-01-01 10:00:00,completed

@@ -1,0 +1,35 @@
+{
+  "original_file": "data/landing/demo_bad.csv",
+  "quarantined_to": "data/quarantine/demo_bad_20260208_083847.csv",
+  "timestamp": "2026-02-08T08:38:47.414075",
+  "status": "QUARANTINED",
+  "validation_results": {
+    "file": "data/landing/demo_bad.csv",
+    "table": "transactions",
+    "timestamp": "2026-02-08T08:38:47.389804",
+    "timeliness": {
+      "passed": true,
+      "error": null
+    },
+    "schema": {
+      "passed": true,
+      "errors": []
+    },
+    "profiling": {
+      "passed": false,
+      "errors": [
+        "\u274c CONSISTENCY: Rule 'No Future Transactions' failed on 1 rows"
+      ]
+    },
+    "overall_status": "FAIL",
+    "can_load": false
+  },
+  "error_summary": {
+    "total_errors": 1,
+    "timeliness_issues": [],
+    "schema_issues": [],
+    "profiling_issues": [
+      "\u274c CONSISTENCY: Rule 'No Future Transactions' failed on 1 rows"
+    ]
+  }
+}

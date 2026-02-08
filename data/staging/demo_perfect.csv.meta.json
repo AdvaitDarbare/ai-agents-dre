@@ -1,0 +1,25 @@
+{
+  "original_file": "data/landing/demo_perfect.csv",
+  "moved_to": "data/staging/demo_perfect.csv",
+  "timestamp": "2026-02-08T08:38:47.389540",
+  "status": "APPROVED",
+  "validation_results": {
+    "file": "data/landing/demo_perfect.csv",
+    "table": "transactions",
+    "timestamp": "2026-02-08T08:38:47.330174",
+    "timeliness": {
+      "passed": true,
+      "error": null
+    },
+    "schema": {
+      "passed": true,
+      "errors": []
+    },
+    "profiling": {
+      "passed": true,
+      "errors": []
+    },
+    "overall_status": "PASS",
+    "can_load": true
+  }
+}
