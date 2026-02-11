@@ -1,7 +1,7 @@
 """
 Anomaly Detector Tool - Statistical AI for Data Observability
 
-    This tool implements statistical anomaly detection inspired by Monte Carlo and Databricks.
+    This tool implements statistical anomaly detection using industrial observability patterns.
     It uses DuckDB as a persistent memory store to learn historical patterns and detect:
     1. Volume anomalies (row count shifts)
     2. Distribution shifts (null rate changes, mean value changes)

@@ -12,7 +12,7 @@ def get_main_styles():
 
         /* App Background */
         .stApp {
-            background-color: #f8f9fa; /* Light grey background like Databricks */
+            background-color: #f8f9fa; /* Light grey background */
         }
 
         /* Sidebar Styling */

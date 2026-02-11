@@ -6,7 +6,7 @@ It provides real-time insights into pipeline health, anomaly detection, and agen
 
 Key Features:
 1. Pipeline Status & Trust Score
-2. Visual Anomaly Detection (Monte Carlo style charts)
+2. Visual Anomaly Detection (Advanced observability charts)
 3. Live Agent Execution & Reasoning
 4. Data Loading Controls
 """
@@ -267,7 +267,7 @@ tab_health, tab_overview, tab_deep_dive, tab_lineage, tab_history, tab_schema_lo
 # ---------------------------------------------------------
 with tab_health:
     st.subheader("🏥 Schema Health Overview")
-    st.markdown("Monitor **all** dataset contracts at a glance — Databricks-style schema-level monitoring.")
+    st.markdown("Monitor **all** dataset contracts at a glance — Enterprise-grade schema-level monitoring.")
     
     discovered = st.session_state.get("discovered_datasets", [])
     all_results = st.session_state.get("all_results", {})

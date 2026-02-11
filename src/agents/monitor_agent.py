@@ -420,7 +420,7 @@ class MonitorAgent:
         Scans config/expectations/*.yaml and returns metadata for each dataset:
         - name, column_count, has_quality_rules, lifecycle, criticality
         
-        This replaces manual dataset selection with Databricks-style
+        This replaces manual dataset selection with automated
         schema-level monitoring.
         
         Returns:
@@ -513,7 +513,7 @@ class MonitorAgent:
         """
         Run health checks on ALL discovered datasets.
         
-        This is the Databricks-style 'schema-level monitoring':
+        This is the enterprise-grade 'schema-level monitoring':
         one click → monitor everything.
         
         Args:
