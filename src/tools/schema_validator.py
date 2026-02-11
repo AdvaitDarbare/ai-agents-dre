@@ -116,6 +116,7 @@ class ValidationResult:
             "passed_checks": self.passed_checks,
             "failed_checks": self.failed_checks,
             "total_issues": len(self.issues),
+            "schema_diff": self.get_schema_diff(),
             "issues": [
                 {
                     "severity": issue.severity.value,
@@ -128,6 +129,33 @@ class ValidationResult:
                 for issue in self.issues
             ]
         }
+
+    def get_schema_diff(self) -> Dict[str, List[str]]:
+        """
+        Return a structured diff of the schema validation.
+        
+        Returns:
+            Dict with keys: missing_columns, new_columns, type_mismatches
+        """
+        diff = {
+            "missing_columns": [],
+            "new_columns": [],
+            "type_mismatches": []
+        }
+        
+        for issue in self.issues:
+            if issue.issue_type == "missing_column":
+                diff["missing_columns"].append(issue.column)
+            elif issue.issue_type == "unexpected_column":
+                diff["new_columns"].append(issue.column)
+            elif issue.issue_type == "type_mismatch":
+                diff["type_mismatches"].append({
+                    "column": issue.column,
+                    "expected": issue.expected,
+                    "actual": issue.actual
+                })
+                
+        return diff
 
 
 class SchemaValidator:
