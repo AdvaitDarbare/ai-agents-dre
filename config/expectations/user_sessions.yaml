@@ -1,0 +1,69 @@
+kind: DataContract
+apiVersion: v3.1.0
+id: urn:datacontract:user_sessions
+info:
+  title: User Sessions Dataset
+  version: 1.0.0
+  description: User session activity logs for engagement tracking
+  owner: Product Analytics Team
+  domain: analytics
+
+table_name: user_sessions
+description: User session activity data for quality validation
+
+quality:
+  min_rows: 5
+  max_rows: 50000
+
+  anomaly_thresholds:
+    z_score_warning: 2.5
+    z_score_critical: 3.0
+    quality_score_warn: 80
+    quality_score_block: 50
+
+  custom_checks:
+    - name: "Session Duration Positive"
+      sql_condition: "duration_seconds > 0"
+      severity: error
+    - name: "No Future Sessions"
+      sql_condition: "session_start <= now()"
+      severity: warning
+
+columns:
+  - name: session_id
+    data_type: varchar
+    nullable: false
+    description: Unique session identifier
+    isPrimaryKey: true
+    pattern: "^sess_\\d+$"
+
+  - name: user_id
+    data_type: varchar
+    nullable: false
+    description: User identifier
+    pattern: "^user_\\d+$"
+
+  - name: session_start
+    data_type: DATE
+    nullable: false
+    description: Session start timestamp
+
+  - name: duration_seconds
+    data_type: integer
+    nullable: false
+    description: Session length in seconds
+    min_value: 0
+    max_value: 86400
+
+  - name: page_views
+    data_type: integer
+    nullable: false
+    description: Number of pages viewed in session
+    min_value: 1
+    max_value: 500
+
+  - name: device_type
+    data_type: varchar
+    nullable: false
+    description: Device used for the session
+    allowed_values: ["mobile", "desktop", "tablet"]

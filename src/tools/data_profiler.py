@@ -1,292 +1,422 @@
 """
-Data Profiler Tool - Single-Pass SQL Aggregation for Data Quality
+Data Profiler Tool - Value-Level Quality Checker
 
-This tool performs single-pass SQL aggregation to calculate:
-- Volume: Total row count
-- Completeness: NULL counts per column
-- Range: MIN/MAX values per column
+This is the MISSING SENSOR identified in the architecture audit.
+It goes beyond schema structure to check actual data VALUES:
 
-It validates these metrics against ODCS contract rules.
+1. Range Validation: Is `amount` between min_value and max_value?
+2. Uniqueness Enforcement: Is `transaction_id` truly unique (isPrimaryKey)?
+3. Custom SQL Checks: Executes the `custom_checks` defined in YAML.
+4. Null Enforcement: Checks nullable=false columns for actual nulls.
+5. Per-Column Quality Score: Returns a 0-100% score per column.
+
+This bridges the gap between "the data LOOKS right" (schema) and "the data IS right" (values).
 """
 
 import duckdb
+import yaml
+import pandas as pd
 from pathlib import Path
-from typing import List, Dict, Any
-from src.utils.contract_parser import ContractParser
+from typing import Dict, List, Any, Optional, Union
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ColumnProfile:
+    """Profile result for a single column."""
+    name: str
+    total_rows: int = 0
+    null_count: int = 0
+    null_rate: float = 0.0
+    unique_count: int = 0
+    uniqueness_rate: float = 0.0
+    min_value: Any = None
+    max_value: Any = None
+    mean_value: float = None
+    violations: List[str] = field(default_factory=list)
+    quality_score: float = 100.0  # 0-100%
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "total_rows": self.total_rows,
+            "null_count": self.null_count,
+            "null_rate": round(self.null_rate, 4),
+            "unique_count": self.unique_count,
+            "uniqueness_rate": round(self.uniqueness_rate, 4),
+            "min_value": str(self.min_value) if self.min_value is not None else None,
+            "max_value": str(self.max_value) if self.max_value is not None else None,
+            "mean_value": round(self.mean_value, 4) if self.mean_value is not None else None,
+            "violations": self.violations,
+            "quality_score": round(self.quality_score, 2)
+        }
+
+
+@dataclass
+class ProfileReport:
+    """Full profiling report for a dataset."""
+    dataset_name: str
+    total_rows: int = 0
+    total_columns: int = 0
+    overall_quality_score: float = 100.0
+    column_profiles: Dict[str, ColumnProfile] = field(default_factory=dict)
+    constraint_violations: List[Dict[str, Any]] = field(default_factory=list)
+    custom_check_results: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "dataset_name": self.dataset_name,
+            "total_rows": self.total_rows,
+            "total_columns": self.total_columns,
+            "overall_quality_score": round(self.overall_quality_score, 2),
+            "column_profiles": {k: v.to_dict() for k, v in self.column_profiles.items()},
+            "constraint_violations": self.constraint_violations,
+            "custom_check_results": self.custom_check_results
+        }
 
 
 class DataProfiler:
     """
-    The Mathematician - Analyzes data values using single-pass SQL aggregation.
+    The Value-Level Quality Checker.
     
-    This tool doesn't care about column names; it cares about the VALUES inside them.
-    It constructs one giant SQL query to calculate all metrics in milliseconds.
+    Goes beyond schema validation to check actual data content
+    against the rules defined in the YAML data contract.
     """
-    
-    def __init__(self, contracts_path: str = "config/expectations"):
+
+    # Numeric types for range checking
+    NUMERIC_TYPES = {"integer", "bigint", "smallint", "float", "double", "decimal", "int"}
+
+    def __init__(self):
+        """Initialize the Data Profiler."""
+        pass
+
+    def profile(self, df: pd.DataFrame, contract_path: Union[str, Path], 
+                dataset_name: str = "unknown") -> ProfileReport:
         """
-        Initialize the DataProfiler.
+        Profile a DataFrame against its data contract.
         
         Args:
-            contracts_path: Directory containing ODCS contract YAML files
-        """
-        self.contracts_path = contracts_path
-        self.contract_parser = ContractParser(contracts_path)
-        self.conn = duckdb.connect(":memory:")
-    
-    def analyze(self, file_path: str, table_name: str) -> List[str]:
-        """
-        Analyze a CSV file against its ODCS contract using single-pass SQL.
-        
-        Args:
-            file_path: Path to the CSV file to analyze
-            table_name: Name of the table/dataset (used to find contract)
+            df: The Pandas DataFrame to profile.
+            contract_path: Path to the YAML data contract.
+            dataset_name: Name of the dataset for reporting.
             
         Returns:
-            List of error strings. Empty list if all checks pass.
-            
-        Example output:
-            [
-                "❌ VOLUME: Found 5 rows, expected at least 100 rows",
-                "❌ COMPLETENESS: Column 'user_id' has 3 NULL values (required field)",
-                "❌ RANGE: Column 'amount' min value -50.0 is below allowed minimum 0.0",
-                "❌ CONSISTENCY: Rule 'No Future Transactions' failed on 1 rows"
-            ]
+            ProfileReport with per-column quality scores and violations.
         """
-        errors = []
-        
-        try:
-            # Get quality rules from contract
-            rules = self.contract_parser.get_quality_rules(table_name)
-            schema_columns = self.contract_parser.get_schema_columns(table_name)
-            
-            # Build and execute single-pass SQL query
-            profile_data = self._execute_profiling_query(file_path, rules, schema_columns)
-            
-            # Validate against rules (volume, completeness, range)
-            errors.extend(self._validate_rules(profile_data, rules))
-            
-            # Execute custom SQL consistency checks
-            errors.extend(self._validate_consistency_rules(file_path, rules))
-            
-        except FileNotFoundError as e:
-            errors.append(f"⚠️ NO CONTRACT: {str(e)}")
-        except Exception as e:
-            errors.append(f"❌ ERROR: Failed to analyze data: {str(e)}")
-        
-        return errors
-    
-    def _execute_profiling_query(self, file_path: str, rules: List[Dict], schema_columns: Dict[str, str]) -> Dict[str, Any]:
-        """
-        Construct and execute a single-pass SQL query to calculate all metrics.
-        
-        This is the "magic" - one query to rule them all!
-        
-        Args:
-            file_path: Path to CSV file
-            rules: List of quality rules from contract
-            schema_columns: Expected columns from contract
-            
-        Returns:
-            Dictionary with profiling results
-        """
-        # First, get the actual columns in the CSV
-        actual_columns_query = f"SELECT * FROM read_csv_auto('{file_path}') LIMIT 0"
-        actual_columns_raw = [desc[0] for desc in self.conn.execute(actual_columns_query).description]
-        actual_columns = [col.lower() for col in actual_columns_raw]
-        
-        # Build SELECT clauses for each metric
-        select_clauses = ["COUNT(*) as total_rows"]
-        columns_to_profile = []
-        
-        # Determine which columns need profiling based on rules
-        required_columns = set()
-        range_columns = {}
-        
-        for rule in rules:
-            if rule['scope'] == 'column':
-                col_name = rule['column']
-                required_columns.add(col_name)
-                
-                if rule['type'] == 'range':
-                    range_columns[col_name] = rule
-        
-        # Profile each column
-        for col_name in schema_columns.keys():
-            if col_name.lower() not in actual_columns:
-                # Column doesn't exist - we'll handle this in validation
+        report = ProfileReport(
+            dataset_name=dataset_name,
+            total_rows=len(df),
+            total_columns=len(df.columns)
+        )
+
+        # Load the contract
+        contract = self._load_contract(contract_path)
+        if not contract:
+            report.constraint_violations.append({
+                "type": "CONTRACT_ERROR",
+                "message": f"Could not load contract from {contract_path}"
+            })
+            return report
+
+        columns_spec = contract.get("columns", [])
+        quality_config = contract.get("quality", {})
+
+        # -------------------------------------------------------
+        # 1. Per-Column Profiling
+        # -------------------------------------------------------
+        for col_spec in columns_spec:
+            col_name = col_spec.get("name")
+            if col_name not in df.columns:
+                # Column missing from data — already caught by SchemaValidator
                 continue
-            
-            columns_to_profile.append(col_name)
-            
-            # Count non-null values
-            select_clauses.append(f"COUNT({col_name}) as {col_name}_count")
-            
-            # Calculate MIN/MAX for columns with range rules
-            if col_name in range_columns:
-                select_clauses.append(f"MIN({col_name}) as {col_name}_min")
-                select_clauses.append(f"MAX({col_name}) as {col_name}_max")
-        
-        # Construct the full query
-        query = f"""
-            SELECT {', '.join(select_clauses)}
-            FROM read_csv_auto('{file_path}')
-        """
-        
-        # Execute query
-        result = self.conn.execute(query).fetchone()
-        
-        # Parse results into dictionary
-        profile_data = {
-            'total_rows': result[0],
-            'columns': {},
-            'missing_columns': [col for col in schema_columns.keys() if col.lower() not in actual_columns]
-        }
-        
-        idx = 1
-        for col_name in columns_to_profile:
-            profile_data['columns'][col_name] = {
-                'count': result[idx],
-                'null_count': result[0] - result[idx]  # total_rows - non_null_count
-            }
-            idx += 1
-            
-            # Add min/max if they were calculated
-            if col_name in range_columns:
-                profile_data['columns'][col_name]['min'] = result[idx]
-                profile_data['columns'][col_name]['max'] = result[idx + 1]
-                idx += 2
-        
-        return profile_data
-    
-    def _validate_rules(self, profile_data: Dict[str, Any], rules: List[Dict]) -> List[str]:
-        """
-        Validate profile data against all rules from the contract.
-        
-        Args:
-            profile_data: Results from profiling query
-            rules: List of quality rules
-            
-        Returns:
-            List of error messages
-        """
-        errors = []
-        
-        for rule in rules:
-            if rule['scope'] == 'dataset':
-                # Dataset-level rules (volume)
-                if rule['type'] == 'rowCount':
-                    total_rows = profile_data['total_rows']
-                    min_rows = rule.get('min', 0)
-                    max_rows = rule.get('max', float('inf'))
-                    
-                    if total_rows < min_rows:
-                        errors.append(
-                            f"❌ VOLUME: Found {total_rows} rows, expected at least {min_rows} rows"
+
+            profile = self._profile_column(df, col_name, col_spec)
+            report.column_profiles[col_name] = profile
+
+        # -------------------------------------------------------
+        # 2. Row Count Validation (min_rows / max_rows)
+        # -------------------------------------------------------
+        min_rows = quality_config.get("min_rows")
+        max_rows = quality_config.get("max_rows")
+
+        if min_rows is not None and len(df) < min_rows:
+            report.constraint_violations.append({
+                "type": "ROW_COUNT_BELOW_MIN",
+                "severity": "error",
+                "message": f"Row count ({len(df)}) is below minimum ({min_rows})",
+                "expected": min_rows,
+                "actual": len(df)
+            })
+
+        if max_rows is not None and len(df) > max_rows:
+            report.constraint_violations.append({
+                "type": "ROW_COUNT_ABOVE_MAX",
+                "severity": "error",
+                "message": f"Row count ({len(df)}) exceeds maximum ({max_rows})",
+                "expected": max_rows,
+                "actual": len(df)
+            })
+
+        # -------------------------------------------------------
+        # 3. Custom SQL Checks (via DuckDB)
+        # -------------------------------------------------------
+        custom_checks = quality_config.get("custom_checks", [])
+        if custom_checks:
+            report.custom_check_results = self._run_custom_checks(df, custom_checks, columns_spec)
+
+        # -------------------------------------------------------
+        # 4. Calculate Overall Quality Score
+        # -------------------------------------------------------
+        report.overall_quality_score = self._calculate_overall_score(report)
+
+        return report
+
+    def _load_contract(self, contract_path: Union[str, Path]) -> Optional[Dict]:
+        """Load and parse the YAML data contract."""
+        path = Path(contract_path)
+        if not path.exists():
+            print(f"⚠️ Contract file not found: {path}")
+            return None
+        try:
+            with open(path, "r") as f:
+                return yaml.safe_load(f)
+        except Exception as e:
+            print(f"❌ Failed to parse contract: {e}")
+            return None
+
+    def _profile_column(self, df: pd.DataFrame, col_name: str, 
+                        col_spec: Dict) -> ColumnProfile:
+        """Profile a single column against its specification."""
+        series = df[col_name]
+        total = len(series)
+
+        profile = ColumnProfile(
+            name=col_name,
+            total_rows=total,
+            null_count=int(series.isnull().sum()),
+            null_rate=float(series.isnull().mean()),
+            unique_count=int(series.nunique()),
+            uniqueness_rate=float(series.nunique() / total) if total > 0 else 0.0
+        )
+
+        violations_count = 0
+
+        # --- Nullable Check ---
+        if col_spec.get("nullable") is False and profile.null_count > 0:
+            profile.violations.append(
+                f"NOT NULL violation: {profile.null_count} null values found "
+                f"({profile.null_rate:.1%} of rows)"
+            )
+            violations_count += profile.null_count
+
+        # --- Primary Key / Uniqueness Check ---
+        if col_spec.get("isPrimaryKey") is True:
+            duplicate_count = total - profile.unique_count
+            if duplicate_count > 0:
+                profile.violations.append(
+                    f"PRIMARY KEY violation: {duplicate_count} duplicate values found "
+                    f"(uniqueness: {profile.uniqueness_rate:.1%})"
+                )
+                violations_count += duplicate_count
+
+        # --- Range Checks (for numeric columns) ---
+        data_type = col_spec.get("data_type", "").lower()
+        if data_type in self.NUMERIC_TYPES or pd.api.types.is_numeric_dtype(series):
+            non_null = series.dropna()
+            if len(non_null) > 0:
+                profile.min_value = float(non_null.min())
+                profile.max_value = float(non_null.max())
+                profile.mean_value = float(non_null.mean())
+
+                # Check min_value constraint
+                spec_min = col_spec.get("min_value")
+                if spec_min is not None:
+                    below_min = (non_null < spec_min).sum()
+                    if below_min > 0:
+                        profile.violations.append(
+                            f"RANGE violation: {below_min} values below minimum ({spec_min}). "
+                            f"Actual min: {profile.min_value}"
                         )
-                    elif max_rows != float('inf') and total_rows > max_rows:
-                        errors.append(
-                            f"❌ VOLUME: Found {total_rows} rows, expected at most {max_rows} rows"
+                        violations_count += int(below_min)
+
+                # Check max_value constraint
+                spec_max = col_spec.get("max_value")
+                if spec_max is not None:
+                    above_max = (non_null > spec_max).sum()
+                    if above_max > 0:
+                        profile.violations.append(
+                            f"RANGE violation: {above_max} values above maximum ({spec_max}). "
+                            f"Actual max: {profile.max_value}"
                         )
-            
-            elif rule['scope'] == 'column':
-                col_name = rule['column']
-                
-                # Check if column is missing
-                if col_name in profile_data['missing_columns']:
-                    if rule['type'] == 'notNull':
-                        errors.append(
-                            f"❌ COMPLETENESS: Column '{col_name}' is missing from dataset (required field)"
-                        )
-                    continue
-                
-                col_profile = profile_data['columns'].get(col_name, {})
-                
-                # Completeness rules
-                if rule['type'] == 'notNull':
-                    null_count = col_profile.get('null_count', 0)
-                    if null_count > 0:
-                        errors.append(
-                            f"❌ COMPLETENESS: Column '{col_name}' has {null_count} NULL values (required field)"
-                        )
-                
-                # Range rules
-                elif rule['type'] == 'range':
-                    actual_min = col_profile.get('min')
-                    actual_max = col_profile.get('max')
-                    
-                    allowed_min = rule.get('min', float('-inf'))
-                    allowed_max = rule.get('max', float('inf'))
-                    
-                    if actual_min is not None and actual_min < allowed_min:
-                        errors.append(
-                            f"❌ RANGE: Column '{col_name}' min value {actual_min} is below allowed minimum {allowed_min}"
-                        )
-                    
-                    if actual_max is not None and actual_max > allowed_max:
-                        errors.append(
-                            f"❌ RANGE: Column '{col_name}' max value {actual_max} exceeds allowed maximum {allowed_max}"
-                        )
-        
-        return errors
-    
-    def _validate_consistency_rules(self, file_path: str, rules: List[Dict]) -> List[str]:
-        """
-        Execute custom SQL consistency checks from the contract.
-        
-        These are business logic rules like:
-        - start_date < end_date
-        - timestamp <= now()
-        - amount < 5000 OR (amount >= 5000 AND status = 'COMPLETED')
-        
-        Args:
-            file_path: Path to the CSV file
-            rules: List of quality rules from contract
-            
-        Returns:
-            List of error messages for failing consistency checks
-        """
-        errors = []
-        
-        for rule in rules:
-            # Only process SQL-type rules
-            if rule.get('type') == 'sql' and rule.get('scope') == 'dataset':
-                try:
-                    rule_name = rule.get('name', 'Custom Check')
-                    sql_condition = rule['query']
-                    
-                    # Count rows that VIOLATE the rule (i.e., NOT meeting the condition)
-                    query = f"""
-                        SELECT COUNT(*) 
-                        FROM read_csv_auto('{file_path}')
-                        WHERE NOT ({sql_condition})
-                    """
-                    
-                    failing_rows = self.conn.execute(query).fetchone()[0]
-                    
-                    if failing_rows > 0:
-                        errors.append(
-                            f"❌ CONSISTENCY: Rule '{rule_name}' failed on {failing_rows} rows"
-                        )
-                        
-                except Exception as e:
-                    errors.append(
-                        f"❌ CONSISTENCY: Failed to execute rule '{rule_name}': {str(e)}"
+                        violations_count += int(above_max)
+
+        # --- Regex Pattern Check ---
+        pattern = col_spec.get("pattern")
+        if pattern and pd.api.types.is_string_dtype(series):
+            import re
+            non_null_str = series.dropna().astype(str)
+            if len(non_null_str) > 0:
+                matches = non_null_str.apply(lambda x: bool(re.match(pattern, x)))
+                mismatches = (~matches).sum()
+                if mismatches > 0:
+                    profile.violations.append(
+                        f"PATTERN violation: {mismatches} values don't match '{pattern}' "
+                        f"({mismatches/total:.1%} of rows)"
                     )
+                    violations_count += int(mismatches)
+
+        # --- Allowed Values Check ---
+        allowed_values = col_spec.get("allowed_values")
+        if allowed_values and len(allowed_values) > 0:
+            non_null_vals = series.dropna()
+            if len(non_null_vals) > 0:
+                invalid = ~non_null_vals.isin(allowed_values)
+                invalid_count = invalid.sum()
+                if invalid_count > 0:
+                    sample_invalids = list(non_null_vals[invalid].unique()[:5])
+                    profile.violations.append(
+                        f"ALLOWED VALUES violation: {invalid_count} values not in {allowed_values}. "
+                        f"Examples: {sample_invalids}"
+                    )
+                    violations_count += int(invalid_count)
+
+        # --- Quality Score ---
+        if total > 0:
+            profile.quality_score = max(0.0, ((total - violations_count) / total) * 100)
+        else:
+            profile.quality_score = 0.0
+
+        return profile
+
+    # Types that should be coerced to datetime for DuckDB compatibility
+    DATETIME_TYPES = {"date", "timestamp", "datetime"}
+
+    def _run_custom_checks(self, df: pd.DataFrame, 
+                           checks: List[Dict],
+                           columns_spec: Optional[List[Dict]] = None) -> List[Dict[str, Any]]:
+        """
+        Execute custom SQL checks defined in the YAML contract.
+        Uses DuckDB to run SQL against the DataFrame.
         
-        return errors
+        Auto-casts date/timestamp columns to avoid DuckDB type mismatch errors
+        (e.g., VARCHAR vs TIMESTAMP when comparing with now()).
+        """
+        results = []
+        
+        # Pre-cast DataFrame columns to proper types for DuckDB
+        df_cast = df.copy()
+        if columns_spec:
+            for col_spec in columns_spec:
+                col_name = col_spec.get("name", "")
+                col_type = col_spec.get("data_type", "").lower()
+                if col_name in df_cast.columns and col_type in self.DATETIME_TYPES:
+                    try:
+                        df_cast[col_name] = pd.to_datetime(df_cast[col_name], errors="coerce")
+                    except Exception:
+                        pass  # Leave as-is if conversion fails
+
+        conn = duckdb.connect()
+        conn.register("data_table", df_cast)
+
+        for check in checks:
+            check_name = check.get("name", "Unnamed Check")
+            sql_condition = check.get("sql_condition", "")
+            severity = check.get("severity", "warning")
+
+            if not sql_condition:
+                continue
+
+            try:
+                # Count rows that VIOLATE the condition (NOT matching)
+                query = f"SELECT COUNT(*) FROM data_table WHERE NOT ({sql_condition})"
+                try:
+                    violation_count = conn.execute(query).fetchone()[0]
+                except Exception as cast_err:
+                    if "cast" in str(cast_err).lower() or "compare" in str(cast_err).lower():
+                        # DuckDB timestamp precision mismatch — create a view with explicit casts
+                        cast_cols = []
+                        for col in df_cast.columns:
+                            if pd.api.types.is_datetime64_any_dtype(df_cast[col]):
+                                cast_cols.append(f"CAST(\"{col}\" AS TIMESTAMP) AS \"{col}\"")
+                            else:
+                                cast_cols.append(f"\"{col}\"")
+                        view_sql = f"CREATE OR REPLACE VIEW data_casted AS SELECT {', '.join(cast_cols)} FROM data_table"
+                        conn.execute(view_sql)
+                        query_retry = f"SELECT COUNT(*) FROM data_casted WHERE NOT ({sql_condition})"
+                        violation_count = conn.execute(query_retry).fetchone()[0]
+                    else:
+                        raise cast_err
+                total_count = len(df)
+
+                passed = violation_count == 0
+                results.append({
+                    "name": check_name,
+                    "severity": severity,
+                    "passed": passed,
+                    "violation_count": violation_count,
+                    "total_rows": total_count,
+                    "violation_rate": round(violation_count / total_count, 4) if total_count > 0 else 0,
+                    "sql": sql_condition
+                })
+
+            except Exception as e:
+                results.append({
+                    "name": check_name,
+                    "severity": severity,
+                    "passed": False,
+                    "error": str(e),
+                    "sql": sql_condition
+                })
+
+        conn.close()
+        return results
+
+    def _calculate_overall_score(self, report: ProfileReport) -> float:
+        """
+        Calculate the overall quality score for the dataset.
+        
+        Formula: Average of all column quality scores, 
+                 penalized by constraint violations.
+        """
+        if not report.column_profiles:
+            return 100.0
+
+        # Average column quality
+        col_scores = [p.quality_score for p in report.column_profiles.values()]
+        avg_col_score = sum(col_scores) / len(col_scores)
+
+        # Penalty for constraint violations (-5% each)
+        constraint_penalty = len(report.constraint_violations) * 5.0
+
+        # Penalty for failed custom checks (-3% each)
+        failed_custom = sum(
+            1 for r in report.custom_check_results 
+            if not r.get("passed", True)
+        )
+        custom_penalty = failed_custom * 3.0
+
+        return max(0.0, avg_col_score - constraint_penalty - custom_penalty)
 
 
-if __name__ == '__main__':
-    # Example usage
+if __name__ == "__main__":
+    import json
+
+    # Test with mock data
+    df_test = pd.DataFrame({
+        "transaction_id": ["txn_1", "txn_2", "txn_3", "txn_1"],  # Duplicate PK!
+        "user_id": ["u1", None, "u3", "u4"],  # Null in non-nullable!
+        "amount": [100.0, 200.0, -50.0, 15000.0],  # Out of range!
+        "timestamp": pd.to_datetime(["2023-01-01"] * 4),
+        "status": ["completed", "pending", "completed", "failed"]
+    })
+
     profiler = DataProfiler()
-    
-    # Analyze a file
-    errors = profiler.analyze('data/landing/transactions_perfect.csv', 'transactions')
-    
-    if not errors:
-        print("✅ All data quality checks passed!")
-    else:
-        print("❌ Data quality issues found:")
-        for error in errors:
-            print(f"   {error}")
+    report = profiler.profile(
+        df_test, 
+        "config/expectations/transactions.yaml",
+        "transactions"
+    )
+
+    print("\n🔍 Data Profile Report:")
+    print(json.dumps(report.to_dict(), indent=2))
+    print(f"\n📊 Overall Quality Score: {report.overall_quality_score:.1f}%")

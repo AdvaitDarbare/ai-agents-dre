@@ -1,0 +1,29 @@
+# Alert Configuration
+# Defines how alerts are routed based on severity.
+
+channels:
+  slack_general:
+    type: slack
+    webhook_env: SLACK_WEBHOOK_URL
+    description: "General Data Quality Channel"
+  
+  pagerduty_critical:
+    type: pagerduty
+    key_env: PAGERDUTY_KEY
+    description: "On-Call Engineering"
+
+routing:
+  # Rules are evaluated in order.
+  # If a rule matches, the alert is sent to the listed channels.
+  
+  BLOCKED:
+    channels: [pagerduty_critical, slack_general]
+    required_criticality: [HIGH, CRITICAL] # Only page if dataset is high criticality
+    
+  WARNING:
+    channels: [slack_general]
+    required_criticality: [MEDIUM, HIGH, CRITICAL]
+
+  # Fallback for low criticality items
+  DEFAULT:
+    channels: [slack_general]

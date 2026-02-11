@@ -1,11 +1,10 @@
 datasets:
-  logs:
-    consumers:
-    - criticality: LOW
-      name: Dev_Debug_Tool
-      owner: Engineering
-      type: app
   transactions:
+    owner: "payments-team@company.com"
+    upstream:
+      - name: "Payment Gateway API"
+        type: "service"
+        endpoint: "https://api.gateway.com/health"
     consumers:
     - criticality: HIGH
       name: CEO_Revenue_Dashboard
@@ -15,3 +14,24 @@ datasets:
       name: Churn_Prediction_Model
       owner: Data Science
       type: ml_model
+  user_sessions:
+    owner: "product-eng@company.com"
+    upstream:
+      - name: "Auth Service"
+        type: "service"
+        endpoint: "https://auth.internal/status"
+    consumers:
+    - criticality: MEDIUM
+      name: Product_Analytics_Dashboard
+      owner: Product Team
+      type: dashboard
+    - criticality: LOW
+      name: Session_Replay_Tool
+      owner: UX Research
+      type: app
+  logs:
+    consumers:
+    - criticality: LOW
+      name: Dev_Debug_Tool
+      owner: Engineering
+      type: app

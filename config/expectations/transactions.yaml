@@ -15,6 +15,13 @@ quality:
   min_rows: 10      
   max_rows: 100000  
   
+  # Configurable anomaly thresholds (previously hardcoded at 3.0)
+  anomaly_thresholds:
+    z_score_warning: 2.5    # Z-score above this triggers WARNING
+    z_score_critical: 3.0   # Z-score above this triggers BLOCKED (if high impact)
+    quality_score_warn: 80   # Overall quality % below this triggers WARNING
+    quality_score_block: 50  # Overall quality % below this triggers BLOCKED
+  
   custom_checks:
     - name: "No Future Transactions"
       sql_condition: "timestamp <= now()"
@@ -29,11 +36,13 @@ columns:
     nullable: false
     description: Unique transaction identifier
     isPrimaryKey: true
+    pattern: "^txn_\\d+$"
     
   - name: user_id
     data_type: varchar
     nullable: false
     description: User identifier who initiated the transaction
+    pattern: "^user_\\d+$"
     
   - name: amount
     data_type: double
@@ -51,6 +60,7 @@ columns:
     data_type: varchar
     nullable: false
     description: Transaction status (completed, pending, failed, refunded)
+    allowed_values: ["completed", "pending", "failed", "refunded"]
 
   - name: loyalty_points
     data_type: integer

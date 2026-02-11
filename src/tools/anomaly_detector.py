@@ -64,6 +64,129 @@ class AnomalyDetector:
                 CREATE INDEX IF NOT EXISTS idx_metrics 
                 ON metric_history(dataset_name, metric_name, day_of_week)
             """)
+            
+            # ---------------------------------------------------------
+            # Phase 3: System Tables
+            # ---------------------------------------------------------
+            
+            # Run History — structured outcomes per health check run
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS run_history (
+                    run_id VARCHAR,
+                    timestamp TIMESTAMP,
+                    dataset_name VARCHAR,
+                    status VARCHAR,
+                    quality_score DOUBLE,
+                    anomaly_count INTEGER,
+                    z_score_max DOUBLE,
+                    reason VARCHAR,
+                    duration_ms INTEGER
+                )
+            """)
+            
+            # Learned Thresholds — cached baselines so agents don't re-learn
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS learned_thresholds (
+                    dataset_name VARCHAR,
+                    metric_name VARCHAR,
+                    baseline_mean DOUBLE,
+                    baseline_std DOUBLE,
+                    baseline_type VARCHAR,
+                    last_updated TIMESTAMP,
+                    sample_count INTEGER
+                )
+            """)
+            
+            # Dataset Registry — auto-discovery metadata + scan state
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS dataset_registry (
+                    dataset_name VARCHAR PRIMARY KEY,
+                    contract_path VARCHAR,
+                    lifecycle VARCHAR,
+                    criticality VARCHAR,
+                    last_scanned TIMESTAMP,
+                    last_status VARCHAR,
+                    last_file_mtime DOUBLE,
+                    scan_count INTEGER DEFAULT 0
+                )
+            """)
+            
+        finally:
+            conn.close()
+
+    def save_run_to_history(self, dataset_name: str, status: str, 
+                           quality_score: float, anomaly_count: int,
+                           z_score_max: float, reason: str, 
+                           duration_ms: int) -> str:
+        """Save a run outcome to the run_history system table."""
+        run_id = str(uuid.uuid4())
+        conn = duckdb.connect(self.db_path)
+        try:
+            conn.execute("""
+                INSERT INTO run_history 
+                (run_id, timestamp, dataset_name, status, quality_score, 
+                 anomaly_count, z_score_max, reason, duration_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (run_id, datetime.now(), dataset_name, status, 
+                  quality_score, anomaly_count, z_score_max, reason, duration_ms))
+        finally:
+            conn.close()
+        return run_id
+
+    def save_learned_threshold(self, dataset_name: str, metric_name: str,
+                               mean: float, std: float, 
+                               baseline_type: str, sample_count: int):
+        """Cache a learned threshold so agents don't re-learn every run."""
+        conn = duckdb.connect(self.db_path)
+        try:
+            # Upsert: delete existing then insert
+            conn.execute("""
+                DELETE FROM learned_thresholds 
+                WHERE dataset_name = ? AND metric_name = ?
+            """, (dataset_name, metric_name))
+            conn.execute("""
+                INSERT INTO learned_thresholds
+                (dataset_name, metric_name, baseline_mean, baseline_std, 
+                 baseline_type, last_updated, sample_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (dataset_name, metric_name, mean, std, 
+                  baseline_type, datetime.now(), sample_count))
+        finally:
+            conn.close()
+
+    def update_dataset_registry(self, dataset_name: str, contract_path: str,
+                                lifecycle: str, criticality: str,
+                                status: str = None, file_mtime: float = None):
+        """Update or insert a dataset's registry entry."""
+        conn = duckdb.connect(self.db_path)
+        try:
+            existing = conn.execute(
+                "SELECT scan_count FROM dataset_registry WHERE dataset_name = ?",
+                (dataset_name,)
+            ).fetchone()
+            
+            if existing:
+                scan_count = (existing[0] or 0) + 1
+                conn.execute("""
+                    UPDATE dataset_registry SET
+                        contract_path = ?,
+                        lifecycle = ?,
+                        criticality = ?,
+                        last_scanned = ?,
+                        last_status = COALESCE(?, last_status),
+                        last_file_mtime = COALESCE(?, last_file_mtime),
+                        scan_count = ?
+                    WHERE dataset_name = ?
+                """, (contract_path, lifecycle, criticality,
+                      datetime.now(), status, file_mtime, scan_count, dataset_name))
+            else:
+                conn.execute("""
+                    INSERT INTO dataset_registry 
+                    (dataset_name, contract_path, lifecycle, criticality,
+                     last_scanned, last_status, last_file_mtime, scan_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                """, (dataset_name, contract_path, lifecycle, criticality,
+                      datetime.now(), status, file_mtime))
         finally:
             conn.close()
 
