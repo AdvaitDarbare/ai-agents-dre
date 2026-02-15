@@ -1,59 +1,194 @@
 # Agentic Data Reliability Engineering (DRE) Platform
 
-Welcome to the **Agentic DRE** platform—a next-generation data observability and reliability system driven by autonomous AI agents. This platform acts as an intelligent "gatekeeper" for your data lake and warehouse, ensuring that only high-quality, trusted data makes it into production.
+**Next-generation data observability platform** powered by autonomous AI agents and a modern React frontend. Acts as an intelligent gatekeeper for your data lake and warehouse, ensuring only high-quality, trusted data reaches production.
 
-## 🚀 Progress So Far
+## ✨ Key Features
 
-We have built a robust foundation for automated data reliability:
+### 🎯 6-Dimensional Quality Framework
+- **Completeness**: Null rate tracking, missing value detection
+- **Validity**: Pattern matching, range checks, allowed values
+- **Consistency**: Cross-column validation, referential integrity
+- **Timeliness**: Data freshness monitoring, SLA tracking
+- **Accuracy**: Statistical profiling, outlier detection
+- **Uniqueness**: Duplicate detection, primary key validation
 
-### 1. Agentic Orchestration
-- **Monitor Agent**: A production-grade orchestrator that coordinates multiple detection tools. It uses a "Sequential Logic Pipeline" to evaluate data health.
-- **Agentic Reasoning**: Integrated with **Agno (GPT-4o)** to provide human-readable verdicts, deep analysis of anomalies, and actionable technical advice.
-- **Triage Logic**: Implemented sophisticated status handling (PASSED, WARNING, BLOCKED) based on criticality and impact.
+### 🤖 Agentic Orchestration
+- **Monitor Agent**: Production-grade orchestrator coordinating detection tools via sequential pipeline
+- **LLM Reasoning**: GPT-4o integration for anomaly analysis and remediation suggestions
+- **Smart Triage**: Automated status handling (PASSED, WARNING, BLOCKED) based on criticality
 
-### 2. Multi-Layer Detection
-- **Schema Validation (Hard Gate)**: Automated checks for missing columns and type mismatches that block broken data before it lands.
-- **Data Profiling**: Value-level quality checks including null rates, distribution statistics, and custom SQL-based business logic validation.
-- **Anomaly Detection**: Z-score based drift detection for volume and metric distributions, backed by a persistent **DuckDB** history.
-- **Impact Analysis**: Lineage-aware criticality assessment to determine the "blast radius" of data issues.
+### 📊 Multi-Layer Detection
+- **Schema Validation**: Hard gate for column presence, type checks, row count constraints
+- **Data Profiling**: Column-level quality scoring with violation examples
+- **Anomaly Detection**: Z-score based volume/metric drift with seasonality awareness
+- **Impact Analysis**: Lineage-aware criticality assessment for blast radius calculation
 
-### 3. Automated Remediation
-- **Schema Remediator**: An actuator agent that proposes YAML-based schema fixes when evolution is detected.
-- **Safety First**: Automatic backups of configuration files before any automated updates.
+### 🔧 Automated Remediation
+- **Contract Generator**: AI-powered YAML contract creation from data profiling
+- **Schema Evolution**: Automatic detection and proposal of schema changes
+- **Version Control**: Full history tracking with rollback capabilities
 
-### 4. Control Center (Dashboard)
-- **Schema Health Pulse**: A global view monitoring all dataset contracts at once.
-- **Deep-Dive Analytics**: Heatmaps for null rates, volume anomaly charts with confidence bands, and data freshness timelines.
-- **Interactive Agent**: A copilot interface for querying technical details about pipeline health.
+### 🎨 Modern UI
+- **React 19 + Vite**: Lightning-fast frontend with hot reload
+- **Violet Theme**: Professional color scheme with light/dark mode
+- **Interactive Charts**: Quality radar, volume anomalies, drift detection, null heatmaps
+- **Real-time Updates**: Live scan status and quality score tracking
+
+## 🏗️ Architecture
+
+### Tech Stack
+- **Frontend**: React 19, Vite, Tailwind CSS, Recharts, Framer Motion
+- **Backend**: FastAPI (Python 3.12), psycopg2
+- **Database**: PostgreSQL 16 (persistent storage), DuckDB (in-memory profiling)
+- **LLM**: OpenAI GPT-4o via Agno SDK
+
+### Data Flow
+```
+1. Schema Validation → 2. Data Profiling → 3. Anomaly Detection →
+4. Impact Analysis → 5. Load/Quarantine → 6. LLM Reasoning
+```
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Python 3.12+
+- Node.js 18+
+- Docker (for PostgreSQL)
+
+### 1. Start PostgreSQL
+```bash
+docker-compose up -d
+```
+
+### 2. Install Python Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Set Environment Variables
+```bash
+export OPENAI_API_KEY=your_key_here
+export POSTGRES_HOST=localhost
+export POSTGRES_PORT=5432
+export POSTGRES_DB=dre
+export POSTGRES_USER=dre_user
+export POSTGRES_PASSWORD=dre_password
+```
+
+### 4. Start Backend API
+```bash
+uvicorn src.api:app --reload
+# API available at http://localhost:8000
+```
+
+### 5. Start Frontend
+```bash
+cd frontend
+npm install
+npm run dev
+# UI available at http://localhost:5173
+```
+
+### 6. Run a Scan (CLI)
+```bash
+python src/main.py
+```
+
+## 📁 Project Structure
+
+```
+src/
+  api.py                  # FastAPI backend (all endpoints)
+  main.py                 # CLI entry point
+  agents/
+    monitor_agent.py      # Main orchestrator
+  tools/
+    anomaly_detector.py   # Z-score engine (PostgreSQL)
+    data_profiler.py      # Column quality (DuckDB in-memory)
+    schema_validator.py   # Contract validation (DuckDB in-memory)
+    impact_analyzer.py    # Lineage-based blast radius
+    schema_remediator.py  # LLM-powered schema fixes
+    contract_generator.py # AI contract creation
+    dimension_scorer.py   # 6D quality framework
+  utils/
+    database.py           # PostgreSQL connection pool
+frontend/
+  src/
+    App.jsx               # Main React app (~2400 lines)
+    components/           # Reusable UI components
+    components/charts/    # Visualization components
+    api/index.js          # Axios API client
+config/
+  expectations/*.yaml     # Data contracts per dataset
+  lineage.yaml            # Dependency graph
+  alerts.yaml             # Alert routing rules
+docs/
+  architecture.md         # System design & data flow
+  database.md             # PostgreSQL schema (6 tables)
+  api.md                  # All endpoints with shapes
+  patterns.md             # Coding conventions
+  plan.md                 # Roadmap & tech debt
+```
+
+## 📖 Documentation
+
+- **[Architecture Guide](docs/architecture.md)** - System design, tech decisions, data flow
+- **[Database Schema](docs/database.md)** - All 6 PostgreSQL tables with indexes
+- **[API Reference](docs/api.md)** - Every endpoint with request/response shapes
+- **[Coding Patterns](docs/patterns.md)** - Do/don't patterns, conventions
+- **[Implementation Plan](docs/plan.md)** - Current roadmap, completed features, tech debt
+
+## 🎯 Key Design Decisions
+
+- **PostgreSQL** for all persistent storage (not DuckDB)
+- **DuckDB** only for in-memory DataFrame SQL in profiler/validator
+- **React 19** with Vite for modern, fast frontend
+- **psycopg2 ThreadedConnectionPool** for DB connections (not SQLAlchemy)
+- **YAML contracts** in `config/expectations/` define expected schema
+- **Z-score with seasonality** for anomaly detection (compares same day of week)
+
+## 🔮 Roadmap
+
+### Completed ✅
+- [x] 6-dimensional quality framework
+- [x] React frontend with violet theme
+- [x] PostgreSQL integration
+- [x] Real-time dimension scoring
+- [x] Violation examples display
+- [x] Contract governance UI
+- [x] Anomaly detection with baselines
+- [x] Impact lineage visualization
+
+### In Progress 🚧
+- [ ] Advanced drift detection (K-S test, CUSUM)
+- [ ] Streaming data support (Kafka/Pulsar)
+- [ ] Agentic PII detection
+- [ ] Source system notifications
+
+### Planned 📋
+- [ ] Cloud warehouse connectors (Snowflake, BigQuery, Databricks)
+- [ ] Iceberg table support
+- [ ] Custom alert channels (Slack, PagerDuty)
+- [ ] Multi-tenancy support
+
+## 🧪 Running Tests
+
+```bash
+pytest tests/ -v
+```
+
+## 🤝 Contributing
+
+This is an agentic codebase following best practices from `.agent/skills/agent_best_practices/`:
+- CLAUDE.md is a table of contents, not a manual
+- All documentation lives in the repo (docs/)
+- Plans are versioned (docs/plan.md)
+- Progressive disclosure pattern for context management
+
+## 📝 License
+
+MIT
 
 ---
 
-## 🔮 What's Next?
-
-Our roadmap focuses on deepening the autonomy and integration of the platform:
-
-1.  **Advanced Actuator Agents**: Extending remediation beyond schema fixes to include automated data cleansing, quarantining, and source-system notifications.
-2.  **Expanded Connectivity**: Adding native connectors for major cloud warehouses and data lake formats (e.g., Iceberg) to support enterprise-wide observability.
-3.  **Statistical Sophistication**: Implementing more advanced drift detection methods like Kolmogorov-Smirnov (K-S) tests and CUSUM for subtle trend shifts.
-4.  **Agentic PII Detection**: Automatic identification and masking of sensitive information to ensure compliance and privacy.
-5.  **Streaming Support**: Moving from batch file evaluation to real-time stream monitoring (e.g., Kafka, Pulsar).
-
----
-
-## 🛠️ Getting Started
-
-1.  **Install dependencies**:
-    ```bash
-    pip install -r requirements.txt
-    ```
-2.  **Run the demo**:
-    ```bash
-    python src/main.py
-    ```
-3.  **Launch the Dashboard**:
-    ```bash
-    streamlit run src/dashboard/app.py
-    ```
-
----
 *Built for modern data teams who value reliability, automation, and speed.*
