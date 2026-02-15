@@ -3,6 +3,8 @@ import os
 import pandas as pd
 import json
 import random
+from dotenv import load_dotenv
+load_dotenv()
 from src.agents.monitor_agent import MonitorAgent
 
 # 0. Setup Mock Data

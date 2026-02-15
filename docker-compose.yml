@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dre-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: dre
+      POSTGRES_USER: dre_user
+      POSTGRES_PASSWORD: dre_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - dre_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dre_user -d dre"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  dre_pgdata:

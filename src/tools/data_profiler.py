@@ -15,6 +15,7 @@ This bridges the gap between "the data LOOKS right" (schema) and "the data IS ri
 
 import duckdb
 import yaml
+import logging
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Union
@@ -34,11 +35,14 @@ class ColumnProfile:
     max_value: Any = None
     mean_value: float = None
     violations: List[str] = field(default_factory=list)
+    violation_examples: List[dict] = field(default_factory=list)  # List of {type, examples, count}
     quality_score: float = 100.0  # 0-100%
+    type: str = "unknown"
 
     def to_dict(self) -> dict:
         return {
             "name": self.name,
+            "type": self.type,
             "total_rows": self.total_rows,
             "null_count": self.null_count,
             "null_rate": round(self.null_rate, 4),
@@ -48,6 +52,7 @@ class ColumnProfile:
             "max_value": str(self.max_value) if self.max_value is not None else None,
             "mean_value": round(self.mean_value, 4) if self.mean_value is not None else None,
             "violations": self.violations,
+            "violation_examples": self.violation_examples,
             "quality_score": round(self.quality_score, 2)
         }
 
@@ -62,12 +67,14 @@ class ProfileReport:
     column_profiles: Dict[str, ColumnProfile] = field(default_factory=dict)
     constraint_violations: List[Dict[str, Any]] = field(default_factory=list)
     custom_check_results: List[Dict[str, Any]] = field(default_factory=list)
+    memory_usage_mb: float = 0.0
 
     def to_dict(self) -> dict:
         return {
             "dataset_name": self.dataset_name,
             "total_rows": self.total_rows,
             "total_columns": self.total_columns,
+            "memory_usage_mb": round(self.memory_usage_mb, 2),
             "overall_quality_score": round(self.overall_quality_score, 2),
             "column_profiles": {k: v.to_dict() for k, v in self.column_profiles.items()},
             "constraint_violations": self.constraint_violations,
@@ -86,9 +93,10 @@ class DataProfiler:
     # Numeric types for range checking
     NUMERIC_TYPES = {"integer", "bigint", "smallint", "float", "double", "decimal", "int"}
 
-    def __init__(self):
+    def __init__(self, contracts_path: Union[str, Path] = "config/expectations"):
         """Initialize the Data Profiler."""
-        pass
+        self.contracts_path = Path(contracts_path)
+        self.logger = logging.getLogger(__name__)
 
     def profile(self, df: pd.DataFrame, contract_path: Union[str, Path], 
                 dataset_name: str = "unknown") -> ProfileReport:
@@ -103,35 +111,44 @@ class DataProfiler:
         Returns:
             ProfileReport with per-column quality scores and violations.
         """
+        self.logger.info(f"📊 Starting profile for '{dataset_name}' "
+                         f"({len(df)} rows, {len(df.columns)} columns)")
+        
         report = ProfileReport(
             dataset_name=dataset_name,
             total_rows=len(df),
-            total_columns=len(df.columns)
+            total_columns=len(df.columns),
+            memory_usage_mb=df.memory_usage(deep=True).sum() / 1024 / 1024 if not df.empty else 0.0
         )
 
         # Load the contract
         contract = self._load_contract(contract_path)
         if not contract:
-            report.constraint_violations.append({
-                "type": "CONTRACT_ERROR",
-                "message": f"Could not load contract from {contract_path}"
-            })
-            return report
+            # Fallback: Profile all columns in DF if no contract exists
+            # This enables "Profile -> Propose" workflow
+            for col in df.columns:
+                # Create a dummy spec
+                dtype = str(df[col].dtype)
+                col_spec = {"name": col, "data_type": dtype}
+                profile = self._profile_column(df, col, col_spec)
+                report.column_profiles[col] = profile
+            
+            quality_config = {}
+        else:
+            columns_spec = contract.get("columns", [])
+            quality_config = contract.get("quality", {})
 
-        columns_spec = contract.get("columns", [])
-        quality_config = contract.get("quality", {})
+            # -------------------------------------------------------
+            # 1. Per-Column Profiling
+            # -------------------------------------------------------
+            for col_spec in columns_spec:
+                col_name = col_spec.get("name")
+                if col_name not in df.columns:
+                    # Column missing from data — already caught by SchemaValidator
+                    continue
 
-        # -------------------------------------------------------
-        # 1. Per-Column Profiling
-        # -------------------------------------------------------
-        for col_spec in columns_spec:
-            col_name = col_spec.get("name")
-            if col_name not in df.columns:
-                # Column missing from data — already caught by SchemaValidator
-                continue
-
-            profile = self._profile_column(df, col_name, col_spec)
-            report.column_profiles[col_name] = profile
+                profile = self._profile_column(df, col_name, col_spec)
+                report.column_profiles[col_name] = profile
 
         # -------------------------------------------------------
         # 2. Row Count Validation (min_rows / max_rows)
@@ -171,6 +188,73 @@ class DataProfiler:
 
         return report
 
+    def analyze(self, file_path: str, table_name: str) -> List[str]:
+        """
+        Backwards-compatible wrapper returning legacy string errors.
+
+        This keeps older tests/scripts operational while the platform uses the
+        structured `ProfileReport` interface.
+        """
+        path = Path(file_path)
+        if not path.exists():
+            return [f"❌ FILE ERROR: File not found: {file_path}"]
+
+        try:
+            if path.suffix.lower() == ".parquet":
+                df = pd.read_parquet(path)
+            else:
+                df = pd.read_csv(path)
+        except Exception as exc:
+            return [f"❌ FILE ERROR: Failed to read file: {exc}"]
+
+        contract_path = self.contracts_path / f"{table_name}.yaml"
+        report = self.profile(df, contract_path, table_name)
+
+        errors: List[str] = []
+
+        for violation in report.constraint_violations:
+            message = violation.get("message", "Unknown constraint violation")
+            vtype = violation.get("type", "CONSTRAINT")
+            if "ROW_COUNT" in vtype:
+                errors.append(f"❌ VOLUME: {message}")
+            else:
+                errors.append(f"❌ {vtype}: {message}")
+
+        for col_name, col_profile in report.column_profiles.items():
+            for violation_msg in col_profile.violations:
+                upper = violation_msg.upper()
+                if "NOT NULL" in upper:
+                    errors.append(f"❌ COMPLETENESS: {col_name} NULL violation - {violation_msg}")
+                elif "RANGE" in upper:
+                    normalized = (
+                        violation_msg.replace("below minimum", "below min value")
+                        .replace("above maximum", "above max value")
+                    )
+                    errors.append(f"❌ RANGE: {col_name} {normalized}")
+                elif "PRIMARY KEY" in upper:
+                    errors.append(f"❌ UNIQUENESS: {col_name} {violation_msg}")
+                elif "PATTERN" in upper:
+                    # Legacy analyze() behavior did not fail on regex style checks.
+                    continue
+                elif "ALLOWED VALUES" in upper:
+                    errors.append(f"❌ ALLOWED VALUES: {col_name} {violation_msg}")
+                else:
+                    errors.append(f"❌ QUALITY: {col_name} {violation_msg}")
+
+        for check in report.custom_check_results:
+            if check.get("passed", True):
+                continue
+            check_name = check.get("name", "Unnamed Check")
+            if check.get("error"):
+                errors.append(f"❌ CONSISTENCY: {check_name} failed - {check['error']}")
+            else:
+                violations = check.get("violation_count", 0)
+                errors.append(
+                    f"❌ CONSISTENCY: {check_name} failed - {violations} rows violate rule"
+                )
+
+        return errors
+
     def _load_contract(self, contract_path: Union[str, Path]) -> Optional[Dict]:
         """Load and parse the YAML data contract."""
         path = Path(contract_path)
@@ -196,7 +280,8 @@ class DataProfiler:
             null_count=int(series.isnull().sum()),
             null_rate=float(series.isnull().mean()),
             unique_count=int(series.nunique()),
-            uniqueness_rate=float(series.nunique() / total) if total > 0 else 0.0
+            uniqueness_rate=float(series.nunique() / total) if total > 0 else 0.0,
+            type=str(col_spec.get("data_type", str(series.dtype)))
         )
 
         violations_count = 0
@@ -209,6 +294,21 @@ class DataProfiler:
             )
             violations_count += profile.null_count
 
+            # Collect sample row indices with null values
+            null_indices = df[series.isnull()].index.tolist()[:10]
+            null_examples = []
+            for idx in null_indices:
+                row_dict = df.loc[idx].to_dict()
+                # Convert to JSON-serializable types
+                row_dict = {k: (None if pd.isna(v) else str(v)) for k, v in row_dict.items()}
+                null_examples.append(row_dict)
+
+            profile.violation_examples.append({
+                "type": "NULL",
+                "count": profile.null_count,
+                "examples": null_examples
+            })
+
         # --- Primary Key / Uniqueness Check ---
         if col_spec.get("isPrimaryKey") is True:
             duplicate_count = total - profile.unique_count
@@ -219,10 +319,27 @@ class DataProfiler:
                 )
                 violations_count += duplicate_count
 
+                # Collect sample duplicate rows
+                duplicates = df[series.duplicated(keep=False)].head(10)
+                dup_examples = []
+                for idx, row in duplicates.iterrows():
+                    row_dict = row.to_dict()
+                    row_dict = {k: (None if pd.isna(v) else str(v)) for k, v in row_dict.items()}
+                    dup_examples.append(row_dict)
+
+                profile.violation_examples.append({
+                    "type": "DUPLICATE",
+                    "count": duplicate_count,
+                    "examples": dup_examples
+                })
+
         # --- Range Checks (for numeric columns) ---
         data_type = col_spec.get("data_type", "").lower()
         if data_type in self.NUMERIC_TYPES or pd.api.types.is_numeric_dtype(series):
-            non_null = series.dropna()
+            # Force numeric conversion, coercing errors to NaN
+            numeric_series = pd.to_numeric(series, errors='coerce')
+            non_null = numeric_series.dropna()
+            
             if len(non_null) > 0:
                 profile.min_value = float(non_null.min())
                 profile.max_value = float(non_null.max())
@@ -231,7 +348,8 @@ class DataProfiler:
                 # Check min_value constraint
                 spec_min = col_spec.get("min_value")
                 if spec_min is not None:
-                    below_min = (non_null < spec_min).sum()
+                    below_min_mask = non_null < spec_min
+                    below_min = below_min_mask.sum()
                     if below_min > 0:
                         profile.violations.append(
                             f"RANGE violation: {below_min} values below minimum ({spec_min}). "
@@ -239,10 +357,25 @@ class DataProfiler:
                         )
                         violations_count += int(below_min)
 
+                        # Get original indices where value is below min
+                        below_min_indices = numeric_series[numeric_series < spec_min].index.tolist()[:10]
+                        range_examples = []
+                        for idx in below_min_indices:
+                            row_dict = df.loc[idx].to_dict()
+                            row_dict = {k: (None if pd.isna(v) else str(v)) for k, v in row_dict.items()}
+                            range_examples.append(row_dict)
+
+                        profile.violation_examples.append({
+                            "type": "RANGE_MIN",
+                            "count": int(below_min),
+                            "examples": range_examples
+                        })
+
                 # Check max_value constraint
                 spec_max = col_spec.get("max_value")
                 if spec_max is not None:
-                    above_max = (non_null > spec_max).sum()
+                    above_max_mask = non_null > spec_max
+                    above_max = above_max_mask.sum()
                     if above_max > 0:
                         profile.violations.append(
                             f"RANGE violation: {above_max} values above maximum ({spec_max}). "
@@ -250,9 +383,23 @@ class DataProfiler:
                         )
                         violations_count += int(above_max)
 
+                        # Get original indices where value is above max
+                        above_max_indices = numeric_series[numeric_series > spec_max].index.tolist()[:10]
+                        range_examples = []
+                        for idx in above_max_indices:
+                            row_dict = df.loc[idx].to_dict()
+                            row_dict = {k: (None if pd.isna(v) else str(v)) for k, v in row_dict.items()}
+                            range_examples.append(row_dict)
+
+                        profile.violation_examples.append({
+                            "type": "RANGE_MAX",
+                            "count": int(above_max),
+                            "examples": range_examples
+                        })
+
         # --- Regex Pattern Check ---
         pattern = col_spec.get("pattern")
-        if pattern and pd.api.types.is_string_dtype(series):
+        if pattern and (pd.api.types.is_string_dtype(series) or series.dtype == 'object'):
             import re
             non_null_str = series.dropna().astype(str)
             if len(non_null_str) > 0:
@@ -264,6 +411,20 @@ class DataProfiler:
                         f"({mismatches/total:.1%} of rows)"
                     )
                     violations_count += int(mismatches)
+
+                    # Collect sample pattern violations
+                    mismatch_indices = non_null_str[~matches].index.tolist()[:10]
+                    pattern_examples = []
+                    for idx in mismatch_indices:
+                        row_dict = df.loc[idx].to_dict()
+                        row_dict = {k: (None if pd.isna(v) else str(v)) for k, v in row_dict.items()}
+                        pattern_examples.append(row_dict)
+
+                    profile.violation_examples.append({
+                        "type": "PATTERN",
+                        "count": int(mismatches),
+                        "examples": pattern_examples
+                    })
 
         # --- Allowed Values Check ---
         allowed_values = col_spec.get("allowed_values")
@@ -279,6 +440,20 @@ class DataProfiler:
                         f"Examples: {sample_invalids}"
                     )
                     violations_count += int(invalid_count)
+
+                    # Collect sample allowed values violations
+                    invalid_indices = non_null_vals[invalid].index.tolist()[:10]
+                    allowed_examples = []
+                    for idx in invalid_indices:
+                        row_dict = df.loc[idx].to_dict()
+                        row_dict = {k: (None if pd.isna(v) else str(v)) for k, v in row_dict.items()}
+                        allowed_examples.append(row_dict)
+
+                    profile.violation_examples.append({
+                        "type": "ALLOWED_VALUES",
+                        "count": int(invalid_count),
+                        "examples": allowed_examples
+                    })
 
         # --- Quality Score ---
         if total > 0:
@@ -389,13 +564,50 @@ class DataProfiler:
         constraint_penalty = len(report.constraint_violations) * 5.0
 
         # Penalty for failed custom checks (-3% each)
-        failed_custom = sum(
+        custom_penalty = sum(
             1 for r in report.custom_check_results 
             if not r.get("passed", True)
-        )
-        custom_penalty = failed_custom * 3.0
+        ) * 3.0
 
-        return max(0.0, avg_col_score - constraint_penalty - custom_penalty)
+        final_score = avg_col_score - constraint_penalty - custom_penalty
+        return max(0.0, min(100.0, final_score))
+
+    def extract_metadata(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Extract deterministic metadata from a DataFrame for LLM consumption.
+        
+        Returns:
+            Dict containing column stats, inferred types, and value samples.
+        """
+        metadata = {
+            "total_rows": len(df),
+            "columns": []
+        }
+        
+        for col in df.columns:
+            series = df[col]
+            col_meta = {
+                "name": col,
+                "inferred_type": str(series.dtype),
+                "nullable": bool(series.isnull().any()),
+                "unique_values": int(series.nunique()),
+                "percent_unique": round(series.nunique() / len(df), 4) if len(df) > 0 else 0,
+                "sample_values": series.dropna().head(5).tolist()
+            }
+            
+            # Heuristic for low cardinality (potential enum/categorical)
+            if series.nunique() < 20 and pd.api.types.is_object_dtype(series):
+                col_meta["possible_values"] = series.unique().tolist()
+                
+            # Numeric range
+            if pd.api.types.is_numeric_dtype(series):
+                col_meta["min_value"] = float(series.min())
+                col_meta["max_value"] = float(series.max())
+                col_meta["mean_value"] = float(series.mean())
+                
+            metadata["columns"].append(col_meta)
+            
+        return metadata
 
 
 if __name__ == "__main__":

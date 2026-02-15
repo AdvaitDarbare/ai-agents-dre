@@ -1,0 +1,107 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 40% 98%;
+    /* Cool off-white background */
+    --foreground: 222 47% 11%;
+    /* Deep slate text */
+
+    --card: 0 0% 100%;
+    /* Pure white for cards */
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    --primary: 262 83% 58%;
+    /* Vibrant Violet - DRE Primary */
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 220 14% 96%;
+    /* Cool Gray */
+    --secondary-foreground: 222 47% 11.2%;
+
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    --accent: 262 83% 97%;
+    /* Extremely light Violet accent */
+    --accent-foreground: 262 83% 40%;
+
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 262 83% 58%;
+
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 222 47% 4%;
+    /* Midnight background */
+    --foreground: 213 31% 91%;
+
+    --card: 222 47% 6%;
+    /* Deep charcoal card */
+    --card-foreground: 213 31% 91%;
+
+    --popover: 222 47% 6%;
+    --popover-foreground: 213 31% 91%;
+
+    --primary: 262 83% 58%;
+    /* Vibrant Violet - Consistent */
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 222 47% 12%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 222 47% 12%;
+    --muted-foreground: 215.4 16.3% 56.9%;
+
+    --accent: 262 83% 15%;
+    --accent-foreground: 262 83% 90%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 222 47% 12%;
+    --input: 222 47% 12%;
+    --ring: 262 83% 58%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
+}
+
+.glass {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(139, 92, 246, 0.15);
+}
+
+.animate-pulse-subtle {
+  animation: pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.8;
+  }
+}

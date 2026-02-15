@@ -11,6 +11,7 @@ Uses DuckDB DESCRIBE to introspect data and compares against YAML schema definit
 
 import duckdb
 import yaml
+import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Union
 from dataclasses import dataclass, field
@@ -197,6 +198,7 @@ class SchemaValidator:
         """
         self.schema_path = Path(schema_path)
         self.conn = conn if conn is not None else duckdb.connect(":memory:")
+        self.logger = logging.getLogger(__name__)
         self.schema = self._load_schema()
         
         # Import ContractParser for PK lookup
@@ -279,19 +281,11 @@ class SchemaValidator:
         return expected_normalized == actual_normalized
     
     def validate_file(self, file_path: Union[str, Path], file_format: str = "csv") -> ValidationResult:
-        """
-        Validate a data file against the schema.
-        
-        Args:
-            file_path: Path to data file
-            file_format: Format of the file (csv, parquet, json)
-            
-        Returns:
-            ValidationResult object
-        """
         file_path = Path(file_path)
+        self.logger.info(f"🔍 Validating file: {file_path} (format: {file_format})")
         
         if not file_path.exists():
+            self.logger.error(f"❌ File not found: {file_path}")
             result = ValidationResult(
                 status=ValidationStatus.FAIL,
                 table_name=self.schema.table_name
@@ -308,14 +302,23 @@ class SchemaValidator:
         table_name = "temp_validation_table"
         try:
             if file_format.lower() == "csv":
-                self.conn.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_csv_auto('{file_path}')")
+                self.logger.debug(f"Reading CSV into DuckDB: {file_path}")
+                self.conn.execute(f"""
+                    CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_csv_auto('{file_path}')
+                """)
             elif file_format.lower() == "parquet":
-                self.conn.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_parquet('{file_path}')")
+                self.logger.debug(f"Reading Parquet into DuckDB: {file_path}")
+                self.conn.execute(f"""
+                    CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_parquet('{file_path}')
+                """)
             elif file_format.lower() == "json":
+                self.logger.debug(f"Reading JSON into DuckDB: {file_path}")
                 self.conn.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_json_auto('{file_path}')")
             else:
+                self.logger.error(f"Unsupported format: {file_format}")
                 raise ValueError(f"Unsupported file format: {file_format}")
         except Exception as e:
+            self.logger.exception(f"Failed to load file into DuckDB: {e}")
             result = ValidationResult(
                 status=ValidationStatus.FAIL,
                 table_name=self.schema.table_name
@@ -344,11 +347,13 @@ class SchemaValidator:
             status=ValidationStatus.PASS,
             table_name=self.schema.table_name
         )
+        self.logger.info(f"🏗 Analyzing DuckDB table: {table_name}")
         
         # Use DESCRIBE to get actual schema
         try:
             describe_result = self.conn.execute(f"DESCRIBE {table_name}").fetchall()
         except Exception as e:
+            self.logger.exception(f"Failed to DESCRIBE table: {e}")
             result.add_issue(ValidationIssue(
                 severity=ValidationStatus.FAIL,
                 column=None,
@@ -390,6 +395,8 @@ class SchemaValidator:
             
             # Check data type
             if not self._types_compatible(expected_col.data_type, actual_col["type"]):
+                self.logger.warning(f"⚠️ Type mismatch in '{expected_col.name}': "
+                                  f"Expected {expected_col.data_type}, got {actual_col['type']}")
                 result.add_issue(ValidationIssue(
                     severity=ValidationStatus.FAIL,
                     column=expected_col.name,
