@@ -96,7 +96,9 @@ def init_tables():
                     anomaly_count INTEGER DEFAULT 0,
                     z_score_max DOUBLE PRECISION DEFAULT 0,
                     reason TEXT,
-                    duration_ms INTEGER DEFAULT 0
+                    duration_ms INTEGER DEFAULT 0,
+                    dimension_scores JSONB,
+                    full_verdict JSONB
                 )
             """)
             cur.execute("""

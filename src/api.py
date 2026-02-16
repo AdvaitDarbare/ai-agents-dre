@@ -167,6 +167,47 @@ def get_history(dataset_name: str, limit: int = 50):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/verdict/{run_id}")
+def get_full_verdict(run_id: str):
+    """Get the full verdict with all tool outputs for a specific run."""
+    try:
+        import json
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT run_id, timestamp, dataset_name, status, quality_score,
+                           anomaly_count, z_score_max, reason, duration_ms,
+                           dimension_scores, full_verdict
+                    FROM run_history
+                    WHERE run_id = %s
+                """, (run_id,))
+                row = cur.fetchone()
+
+                if not row:
+                    raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+                # Parse JSONB columns
+                dimension_scores = json.loads(row[9]) if row[9] else None
+                full_verdict = json.loads(row[10]) if row[10] else None
+
+                return {
+                    "run_id": row[0],
+                    "timestamp": row[1].isoformat() if row[1] else None,
+                    "dataset_name": row[2],
+                    "status": row[3],
+                    "quality_score": row[4],
+                    "anomaly_count": row[5],
+                    "z_score_max": row[6],
+                    "reason": row[7],
+                    "duration_ms": row[8],
+                    "dimension_scores": dimension_scores,
+                    "full_verdict": full_verdict
+                }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/chat")
 def chat_with_copilot(query: str):
     """Interact with the Agent reasoning engine."""

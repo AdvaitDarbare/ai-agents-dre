@@ -436,7 +436,8 @@ class MonitorAgent:
                 reason=verdict.get("reason", ""),
                 duration_ms=duration_ms,
                 run_id=run_id,  # Pass our pre-generated run_id
-                dimension_scores=verdict.get("quality_dimensions")  # Save dimension scores
+                dimension_scores=verdict.get("quality_dimensions"),  # Save dimension scores
+                full_verdict=verdict  # Save complete verdict with all tool outputs
             )
             # Use the returned run_id (should be the same as we passed)
             run_id = saved_run_id

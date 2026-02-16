@@ -27,6 +27,36 @@ FastAPI backend at `src/api.py`. Runs on `http://localhost:8000`.
 | GET | `/runs?limit=50` | Recent runs across all datasets |
 | GET | `/history/{dataset_name}?limit=50` | Run history for specific dataset |
 | GET | `/incidents?limit=50` | BLOCKED/WARNING runs as incidents |
+| GET | `/verdict/{run_id}` | **NEW** Full verdict with all tool outputs for a specific run |
+
+### Verdict Response Shape
+```json
+{
+  "run_id": "550e8400-e29b-41d4-a716-446655440000",
+  "timestamp": "2026-02-15T16:03:22.877612+00:00",
+  "dataset_name": "healthcare_messy_data",
+  "status": "WARNING",
+  "quality_score": 79.99,
+  "anomaly_count": 1,
+  "z_score_max": 2.5,
+  "reason": "Data Quality Score below threshold...",
+  "duration_ms": 1234,
+  "dimension_scores": {
+    "completeness": 85.5,
+    "validity": 92.3,
+    // ... other dimensions
+  },
+  "full_verdict": {
+    "schema": { /* schema validation results */ },
+    "profile": { /* data profiling results */ },
+    "anomalies": [ /* anomaly objects */ ],
+    "metrics": { /* statistical metrics */ },
+    "quality_dimensions": { /* 6D scores */ },
+    "llm_advice": "...",
+    "load_status": "..."
+  }
+}
+```
 
 ## Time-Series & Baselines
 

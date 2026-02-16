@@ -24,8 +24,8 @@ One row per pipeline evaluation run.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| run_id | SERIAL PK | Auto-increment |
-| timestamp | TIMESTAMP DEFAULT NOW() | When the run executed |
+| run_id | VARCHAR(64) PK | UUID identifier |
+| timestamp | TIMESTAMPTZ DEFAULT NOW() | When the run executed |
 | dataset_name | VARCHAR(255) | Dataset identifier |
 | status | VARCHAR(50) | PASSED / WARNING / BLOCKED |
 | quality_score | DOUBLE PRECISION | Overall quality % (0-100) |
@@ -33,8 +33,18 @@ One row per pipeline evaluation run.
 | z_score_max | DOUBLE PRECISION DEFAULT 0 | Highest absolute z-score |
 | reason | TEXT | Human-readable verdict reason |
 | duration_ms | INTEGER | Wall-clock time of evaluation |
+| dimension_scores | JSONB | 6-dimensional quality scores |
+| full_verdict | JSONB | Complete verdict with all tool outputs |
 
-**Indexes:** `idx_run_history_dataset` on (dataset_name), `idx_run_history_ts` on (timestamp)
+**Indexes:** `idx_run_history_dataset` on (dataset_name, timestamp DESC)
+
+**Note:** The `full_verdict` column contains the complete pipeline output including:
+- Schema validation results
+- Data profiling details
+- Anomaly detection output
+- Impact analysis
+- LLM advice
+- Load status
 
 ### `metric_history`
 Per-metric time-series data tied to runs.

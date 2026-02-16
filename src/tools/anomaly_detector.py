@@ -36,23 +36,26 @@ class AnomalyDetector:
     def save_run_to_history(self, dataset_name: str, status: str,
                            quality_score: float, anomaly_count: int,
                            z_score_max: float, reason: str,
-                           duration_ms: int, run_id: str = None, dimension_scores: dict = None) -> str:
+                           duration_ms: int, run_id: str = None, dimension_scores: dict = None,
+                           full_verdict: dict = None) -> str:
         """Save a run outcome to the run_history system table."""
         if run_id is None:
             run_id = str(uuid.uuid4())
 
         import json
         dimension_scores_json = json.dumps(dimension_scores) if dimension_scores else None
+        full_verdict_json = json.dumps(full_verdict) if full_verdict else None
 
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO run_history
                     (run_id, timestamp, dataset_name, status, quality_score,
-                     anomaly_count, z_score_max, reason, duration_ms, dimension_scores)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     anomaly_count, z_score_max, reason, duration_ms, dimension_scores, full_verdict)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (run_id, datetime.now(timezone.utc), dataset_name, status,
-                      quality_score, anomaly_count, z_score_max, reason, duration_ms, dimension_scores_json))
+                      quality_score, anomaly_count, z_score_max, reason, duration_ms,
+                      dimension_scores_json, full_verdict_json))
         return run_id
 
     def save_learned_threshold(self, dataset_name: str, metric_name: str,
