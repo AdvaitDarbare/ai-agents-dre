@@ -1260,9 +1260,6 @@ const DatasetsTab = ({ datasets, onProfile, onGenerateContract, previewDataset, 
             className="bg-transparent border-none text-sm focus:outline-none w-full text-foreground"
           />
         </div>
-        <button className="bg-secondary text-secondary-foreground hover:bg-muted transition-all">
-          <Database size={16} /> Register New Dataset
-        </button>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -2095,12 +2092,12 @@ const App = () => {
     <div className="flex h-screen bg-background overflow-hidden font-sans text-foreground">
       {/* Sidebar */}
       <aside
-        className={`${isSidebarCollapsed ? "w-20" : "w-64"} bg-slate-950 border-r border-slate-900 flex flex-col z-20 transition-all duration-300 ease-in-out relative`}
+        className={`${isSidebarCollapsed ? "w-20" : "w-64"} bg-card border-r border-border flex flex-col z-20 transition-all duration-300 ease-in-out relative`}
       >
         {/* Collapse Toggle */}
         <button
           onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-          className="absolute -right-3 top-9 bg-card border border-border rounded-full p-1 text-muted-foreground hover:text-primary hover:border-primary shadow-sm z-50"
+          className="absolute -right-3 top-9 bg-background border border-border rounded-full p-1 text-muted-foreground hover:text-primary hover:border-primary shadow-sm z-50"
         >
           {isSidebarCollapsed ? (
             <ChevronRight size={14} />
@@ -2112,8 +2109,8 @@ const App = () => {
         <div
           className={`p-6 ${isSidebarCollapsed ? "flex justify-center" : ""} `}
         >
-          <div className="flex items-center gap-3 text-white font-black text-2xl tracking-tighter">
-            <div className="w-10 h-10 bg-slate-900 rounded-xl flex items-center justify-center text-primary border border-slate-800 shadow-lg shadow-black/20 flex-shrink-0">
+          <div className="flex items-center gap-3 text-foreground font-black text-2xl tracking-tighter">
+            <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center text-primary-foreground border border-primary shadow-lg flex-shrink-0">
               <ShieldCheck size={24} />
             </div>
             {!isSidebarCollapsed && <span>DRE.ai</span>}
@@ -2134,8 +2131,8 @@ const App = () => {
               key={item.id}
               onClick={() => setActiveTab(item.id)}
               className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-all duration-200 group ${activeTab === item.id
-                ? "bg-white/10 text-white font-bold shadow-sm"
-                : "text-slate-400 hover:bg-white/5 hover:text-white"
+                ? "bg-primary text-primary-foreground font-bold shadow-sm"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground"
                 } ${isSidebarCollapsed ? "justify-center" : ""} `}
               title={isSidebarCollapsed ? item.label : ""}
             >

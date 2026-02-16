@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Loader2, Grid3x3 } from "lucide-react";
-import { getBaselines } from "../../api";
+import { getDatasetProfile } from "../../api";
 
 const getCellColor = (rate) => {
   if (rate === null || rate === undefined) return "bg-slate-100 text-slate-400";
@@ -13,17 +13,17 @@ const getCellColor = (rate) => {
 };
 
 const NullRateHeatmap = ({ datasetName }) => {
-  const [baselines, setBaselines] = useState([]);
+  const [columnProfiles, setColumnProfiles] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const fetch = async () => {
       setLoading(true);
       try {
-        const res = await getBaselines(datasetName);
-        setBaselines(res.data);
+        const res = await getDatasetProfile(datasetName);
+        setColumnProfiles(res.data?.column_profiles || []);
       } catch (e) {
-        console.error("Failed to load baselines", e);
+        console.error("Failed to load profile data", e);
       } finally {
         setLoading(false);
       }
@@ -38,15 +38,10 @@ const NullRateHeatmap = ({ datasetName }) => {
       </div>
     );
 
-  // Filter for null_rate metrics only
-  const nullMetrics = baselines.filter((b) =>
-    b.metric.includes("null_rate")
-  );
-
-  if (!nullMetrics.length)
+  if (!columnProfiles.length)
     return (
       <div className="text-center p-6 text-slate-400 text-sm italic">
-        No null rate data available yet.
+        No column profile data available yet.
       </div>
     );
 
@@ -62,25 +57,22 @@ const NullRateHeatmap = ({ datasetName }) => {
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-        {nullMetrics.map((m) => {
-          const colName = m.metric
-            .replace("null_rate_", "")
-            .replace(/_null_rate$/, "");
-          const rate = m.mean;
+        {columnProfiles.map((col) => {
+          const rate = col.null_count / (col.null_count + col.non_null_count);
           return (
             <div
-              key={m.metric}
+              key={col.column_name}
               className={`rounded-lg p-4 text-center transition-colors ${getCellColor(rate)}`}
-              title={`${colName}: ${(rate * 100).toFixed(2)}% null rate (baseline mean)`}
+              title={`${col.column_name}: ${(rate * 100).toFixed(2)}% null rate (${col.null_count} nulls / ${col.null_count + col.non_null_count} total)`}
             >
               <div className="text-xs font-black uppercase truncate mb-1">
-                {colName}
+                {col.column_name}
               </div>
               <div className="text-base font-black">
                 {(rate * 100).toFixed(1)}%
               </div>
               <div className="text-xs opacity-60 mt-0.5">
-                {m.sample_count} samples
+                {col.null_count} nulls
               </div>
             </div>
           );
