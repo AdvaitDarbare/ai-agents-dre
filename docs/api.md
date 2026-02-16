@@ -87,7 +87,8 @@ This supports richer UI filtering and grouping.
 | Method | Path | Description |
 |---|---|---|
 | GET | `/lineage?dataset=optional` | Full or filtered lineage graph |
-| POST | `/chat?query=...` | Copilot chat |
+| POST | `/chat` | Copilot chat (supports `query` param or JSON body `{ query, context? }`) |
+| POST | `/chat/stream` | AI SDK-compatible text streaming endpoint (`useChat` + `TextStreamChatTransport`) |
 
 ## Example
 

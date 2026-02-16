@@ -1,9 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 import os
 import json
+import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 from pathlib import Path
@@ -36,6 +38,10 @@ class ContractApprovalRequest(BaseModel):
     dataset_name: str
     approved_yaml: str  # The human-reviewed YAML content
 
+class ChatRequest(BaseModel):
+    query: Optional[str] = None
+    context: Dict[str, Any] = Field(default_factory=dict)
+
 app = FastAPI(title="Agentic DRE API")
 
 # Enable CORS for the React frontend
@@ -60,6 +66,31 @@ service = ReliabilityService(
     contract_store=contract_store,
     hitl_workflow=hitl_workflow,
 )
+
+
+def _extract_latest_user_query(messages: List[Dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if str(message.get("role", "")).lower() != "user":
+            continue
+
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+        parts = message.get("parts")
+        if isinstance(parts, list):
+            text_bits = []
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
+                    piece = part.get("text")
+                    if isinstance(piece, str) and piece.strip():
+                        text_bits.append(piece.strip())
+            if text_bits:
+                return " ".join(text_bits).strip()
+
+    return ""
 
 @app.get("/health")
 def health_check():
@@ -206,12 +237,54 @@ def get_full_verdict(run_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chat")
-def chat_with_copilot(query: str):
-    """Interact with the Agent reasoning engine."""
+def chat_with_copilot(query: Optional[str] = None, payload: Optional[ChatRequest] = None):
+    """Interact with the Agent reasoning engine (query param or JSON body)."""
     try:
-        return service.chat_with_copilot(query)
+        effective_query = query or (payload.query if payload else None)
+        if not effective_query:
+            raise HTTPException(status_code=400, detail="query is required")
+        return service.chat_with_copilot(effective_query)
     except Exception as e:
         print(f"Chat Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat/stream")
+async def chat_with_copilot_stream(payload: Dict[str, Any] = Body(default_factory=dict)):
+    """
+    Streaming chat endpoint compatible with AI SDK useChat + TextStreamChatTransport.
+    Expects AI SDK-style payload with a `messages` array.
+    """
+    try:
+        messages = payload.get("messages", [])
+        if not isinstance(messages, list):
+            raise HTTPException(status_code=400, detail="messages must be a list")
+
+        query = _extract_latest_user_query(messages)
+        if not query:
+            raise HTTPException(status_code=400, detail="No user message found")
+
+        response_payload = service.chat_with_copilot(query)
+        full_text = str(response_payload.get("response", "")).strip()
+        if not full_text:
+            full_text = "No response generated."
+
+        async def stream_text():
+            # Emit in small chunks to provide incremental UI updates.
+            words = full_text.split(" ")
+            for i, token in enumerate(words):
+                suffix = " " if i < len(words) - 1 else ""
+                yield f"{token}{suffix}"
+                await asyncio.sleep(0.005)
+
+        return StreamingResponse(
+            stream_text(),
+            media_type="text/plain; charset=utf-8",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Chat Stream Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/lineage")

@@ -1,7 +1,9 @@
 import axios from 'axios';
 
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+
 const api = axios.create({
-    baseURL: 'http://localhost:8000',
+    baseURL: API_BASE_URL,
 });
 
 export const getPulse = () => api.get('/pulse');
@@ -12,7 +14,7 @@ export const deleteDataset = async (name) => {
 };
 export const evaluateDataset = (name) => api.post(`/evaluate/${name}`);
 export const getHistory = (name) => api.get(`/history/${name}`);
-export const chatWithCopilot = (query) => api.post(`/chat?query=${encodeURIComponent(query)}`);
+export const chatWithCopilot = (query) => api.post('/chat', { query });
 
 // --- New Client Functions ---
 export const getDatasetData = (name, limit = 100) => api.get(`/datasets/${name}/data?limit=${limit}`);

@@ -21,6 +21,14 @@ Last updated: 2026-02-16
 - [x] Dataset delete action (with backend artifact cleanup)
 - [x] SLO tab in expanded dataset detail (summary cards + tables)
 - [x] Sidebar behavior/polish improvements
+- [x] AI SDK-powered Copilot panel (`@ai-sdk/react` + `TextStreamChatTransport`)
+- [x] FastAPI streaming chat endpoint for `useChat` (`POST /chat/stream`)
+- [x] Frontend decomposition started: extracted `frontend/src/components/CopilotPanel.jsx`
+
+### Architecture Migration Progress
+- [x] Phase 1: service layer extraction from `src/api.py` (`src/services/reliability_service.py`)
+- [x] Phase 2: MCP server with core tools (`src/mcp/server.py`)
+- [x] Phase 3: LangGraph durable HITL workflow for contract-missing path (`src/workflows/hitl_contract_workflow.py`)
 
 ## Next Priorities
 
@@ -28,14 +36,18 @@ Last updated: 2026-02-16
 - [ ] Introduce async job execution for long-running actions (scan, remediation, bulk delete)
 - [ ] Add incident lifecycle model (OPEN/ACK/RESOLVED) + ownership
 - [ ] Add policy engine for action safety gates (auto vs approval-required)
-- [ ] Fix chat API shape consistency (query param vs JSON body paths)
+- [x] Fix chat API shape consistency (query param + JSON body support)
 - [ ] Add automated tests for `/slos/*` and enriched `/metrics/*/timeseries`
+- [ ] Add backend tests for `/chat/stream` AI SDK transport compatibility
+- [ ] Add LangGraph checkpoint recovery test coverage (restart/resume)
 
 ### P1
-- [ ] Extract `frontend/src/App.jsx` into feature modules/components
+- [ ] Continue extracting `frontend/src/App.jsx` into feature modules/components
+- [ ] Optional AI Elements UI pass for Copilot panel
 - [ ] Add structured action audit log for all operator/agent actions
 - [ ] Add monitor backtesting harness (false positive / false negative tuning)
 - [ ] Improve baseline models for non-stationary metrics
+- [ ] Phase 4: expand LangGraph coverage beyond contract-missing (full evaluate flow)
 
 ### P2
 - [ ] Git-backed contract store implementation

@@ -22,6 +22,7 @@ It validates incoming datasets against contracts, detects anomalies, evaluates S
   - Contract history, rollback, remediation history, and full verdict storage
 - Modern React operations UI
   - Health pulse, dataset management, incident feed, lineage, contract workflows
+  - AI SDK Copilot panel with streaming responses
 
 ## Architecture (Current)
 
@@ -135,6 +136,9 @@ python3 -m src.mcp.server --transport stdio
   - `GET /baselines/{dataset_name}`
   - `GET /slos/{dataset_name}`
   - `GET /slos/{dataset_name}/summary`
+- Copilot chat
+  - `POST /chat`
+  - `POST /chat/stream`
 
 See `docs/api.md` for full request/response details.
 

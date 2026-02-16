@@ -53,7 +53,6 @@ import {
 import {
   getPulse,
   evaluateDataset,
-  chatWithCopilot,
   getDatasets,
   getLineage,
   getSystemHealth,
@@ -91,6 +90,7 @@ import ConstraintViolations from "./components/charts/ConstraintViolations";
 import IncidentFeed from "./components/IncidentFeed";
 import ContractGovernance from "./components/ContractGovernance";
 import ContractAssistant from "./components/ContractAssistant";
+import CopilotPanel from "./components/CopilotPanel";
 
 // --- Modal: Data Profile ---
 const ProfileModal = ({ isOpen, onClose, data }) => {
@@ -2361,17 +2361,6 @@ const App = () => {
     }
   }, [isDarkMode]);
 
-  const [chatMessages, setChatMessages] = useState([
-    {
-      role: "assistant",
-      content:
-        "Hello! I am monitoring the pipeline. Ask me anything about the recent runs.",
-    },
-  ]);
-  const [userInput, setUserInput] = useState("");
-  const [isChatting, setIsChatting] = useState(false);
-  const chatEndRef = useRef(null);
-
   // HITL Contract Approval State
   const [pendingContracts, setPendingContracts] = useState([]);
 
@@ -2388,10 +2377,6 @@ const App = () => {
       }
     };
   }, []);
-
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatMessages]);
 
   // Poll for pending contracts every 15 seconds
   useEffect(() => {
@@ -2565,33 +2550,6 @@ const App = () => {
       alert("Smart Scan encountered errors. Check console for details.");
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleSendMessage = async () => {
-    if (!userInput.trim() || isChatting) return;
-
-    const query = userInput;
-    setUserInput("");
-    setChatMessages((prev) => [...prev, { role: "user", content: query }]);
-    setIsChatting(true);
-
-    try {
-      const res = await chatWithCopilot(query);
-      setChatMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: res.data.response },
-      ]);
-    } catch (err) {
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "Sorry, I encountered an error processing your request.",
-        },
-      ]);
-    } finally {
-      setIsChatting(false);
     }
   };
 
@@ -3162,117 +3120,10 @@ const App = () => {
         </div>
       </main>
 
-      {/* Copilot Sidebar */}
-      <AnimatePresence>
-        {isCopilotOpen && (
-          <motion.aside
-            initial={{ x: 400, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: 400, opacity: 0 }}
-            transition={{ type: "spring", damping: 25, stiffness: 200 }}
-            className="w-[400px] bg-card border-l border-border flex flex-col shadow-[-20px_0_40px_rgba(0,0,0,0.02)] z-30"
-          >
-            <div className="p-8 border-b border-border bg-muted/50 text-foreground">
-              <div className="flex items-center justify-between mb-6">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-2xl bg-slate-900 shadow-lg shadow-black/10 flex items-center justify-center text-primary border border-slate-800">
-                    <Zap size={20} className="fill-primary" />
-                  </div>
-                  <div>
-                    <h3 className="font-black text-foreground text-sm tracking-tight">
-                      DRE Copilot
-                    </h3>
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.5)]" />
-                      <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-widest">
-                        Active reasoning
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <button
-                  onClick={() => setIsCopilotOpen(false)}
-                  className="p-2 hover:bg-muted/80 rounded-lg transition-colors text-muted-foreground/80"
-                >
-                  <ChevronRight size={20} />
-                </button>
-              </div>
-
-              <div className="bg-card p-4 rounded-2xl border border-border shadow-sm">
-                <p className="text-[10px] font-black text-muted-foreground/80 uppercase tracking-widest mb-2">
-                  Capabilities
-                </p>
-                <div className="grid grid-cols-2 gap-2">
-                  {["Root Cause", "Lineage", "Remediation", "Drift"].map(
-                    (c) => (
-                      <div
-                        key={c}
-                        className="bg-muted/50 px-2.5 py-1.5 rounded-lg text-[10px] font-bold text-muted-foreground border border-border flex items-center gap-1.5"
-                      >
-                        <div className="w-1 h-1 rounded-full bg-primary" />
-                        {c}
-                      </div>
-                    ),
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div className="flex-1 p-8 overflow-y-auto space-y-6 scrollbar-hide text-foreground">
-              {chatMessages.map((msg, idx) => (
-                <div
-                  key={idx}
-                  className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"} `}
-                >
-                  <div
-                    className={`max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed shadow-sm ${msg.role === "user"
-                      ? "bg-primary text-white font-medium rounded-tr-none"
-                      : "bg-muted text-foreground/90 font-normal rounded-tl-none border border-border/50"
-                      } `}
-                  >
-                    {msg.content}
-                  </div>
-                </div>
-              ))}
-              {isChatting && (
-                <div className="flex justify-start">
-                  <div className="bg-muted p-4 rounded-2xl rounded-tl-none border border-border/50 flex gap-1">
-                    <div className="w-1 h-1 bg-muted rounded-full animate-bounce [animation-delay:-0.3s]" />
-                    <div className="w-1 h-1 bg-muted rounded-full animate-bounce [animation-delay:-0.15s]" />
-                    <div className="w-1 h-1 bg-muted rounded-full animate-bounce" />
-                  </div>
-                </div>
-              )}
-              <div ref={chatEndRef} />
-            </div>
-
-            <div className="p-8 bg-card border-t border-border">
-              <div className="relative group">
-                <textarea
-                  rows="1"
-                  value={userInput}
-                  onChange={(e) => setUserInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendMessage();
-                    }
-                  }}
-                  placeholder="Ask about data health or lineage..."
-                  className="w-full bg-muted/50 border border-border rounded-2xl pl-5 pr-12 py-4 text-sm focus:outline-none focus:ring-4 focus:ring-primary/10 focus:border-primary transition-all text-foreground placeholder:text-muted-foreground/80 resize-none font-medium"
-                />
-                <button
-                  onClick={handleSendMessage}
-                  disabled={!userInput.trim() || isChatting}
-                  className="absolute right-3 top-3 p-2 bg-primary text-white rounded-xl shadow-lg shadow-primary/30 hover:scale-105 active:scale-95 transition-all disabled:opacity-50 disabled:shadow-none"
-                >
-                  <Send size={18} fill="currentColor" />
-                </button>
-              </div>
-            </div>
-          </motion.aside>
-        )}
-      </AnimatePresence>
+      <CopilotPanel
+        isOpen={isCopilotOpen}
+        onClose={() => setIsCopilotOpen(false)}
+      />
 
     </div>
   );
