@@ -32,6 +32,10 @@ class AnomalyDetector:
     def __init__(self):
         """Initialize the AnomalyDetector — ensures tables exist in PostgreSQL."""
         init_tables()
+        self.z_threshold = 3.0
+        self.robust_z_threshold = 3.5
+        self.iqr_multiplier = 1.5
+        self.max_profiled_columns = 40
 
     def save_run_to_history(self, dataset_name: str, status: str,
                            quality_score: float, anomaly_count: int,
@@ -115,14 +119,25 @@ class AnomalyDetector:
                     """, (dataset_name, contract_path, lifecycle, criticality,
                           datetime.now(), status, file_mtime))
 
-    def save_run_metrics(self, dataset_name: str, metrics_dict: Dict[str, float],
+    def save_run_metrics(self, dataset_name: str, metrics_dict: Dict[str, Union[float, Dict[str, Any]]],
                          run_id: Optional[str] = None) -> str:
         """
         Save metrics for a specific run to history.
 
         Args:
             dataset_name: Name of the dataset (e.g., 'transactions')
-            metrics_dict: Dictionary of metrics (e.g., {'row_count': 100, 'null_rate': 0.0})
+            metrics_dict: Dictionary of metrics.
+                Supports legacy float values and rich dict payloads:
+                {
+                  "row_count": 100,
+                  "null_rate_email": {
+                    "value": 0.05,
+                    "metric_group": "completeness",
+                    "column_name": "email",
+                    "segment": "global",
+                    "tags": {"source": "profile"}
+                  }
+                }
             run_id: Optional existing run_id to associate metrics with.
 
         Returns:
@@ -133,18 +148,255 @@ class AnomalyDetector:
         timestamp = datetime.now(timezone.utc)
         day_of_week = timestamp.weekday()
 
+        normalized = self._normalize_metric_inputs(metrics_dict)
+
         with get_connection() as conn:
             with conn.cursor() as cur:
-                for metric_name, value in metrics_dict.items():
+                for metric_name, payload in normalized.items():
                     cur.execute("""
                         INSERT INTO metric_history
-                        (run_id, timestamp, dataset_name, metric_name, metric_value, day_of_week)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                    """, (run_id, timestamp, dataset_name, metric_name, float(value), day_of_week))
+                        (run_id, timestamp, dataset_name, metric_name, metric_value, day_of_week,
+                         metric_group, column_name, segment, tags)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    """, (
+                        run_id,
+                        timestamp,
+                        dataset_name,
+                        metric_name,
+                        payload["value"],
+                        day_of_week,
+                        payload.get("metric_group", "general"),
+                        payload.get("column_name"),
+                        payload.get("segment", "global"),
+                        json.dumps(payload.get("tags", {})),
+                    ))
 
-            print(f"🧠 MEMORY: Saved {len(metrics_dict)} metrics for '{dataset_name}' (Day {day_of_week})")
+            print(f"🧠 MEMORY: Saved {len(normalized)} metrics for '{dataset_name}' (Day {day_of_week})")
 
         return run_id
+
+    def save_slo_results(self, run_id: str, dataset_name: str, slo_results: List[Dict[str, Any]]) -> None:
+        """Persist per-run SLO checks."""
+        if not run_id or not slo_results:
+            return
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                for result in slo_results:
+                    cur.execute(
+                        """
+                        INSERT INTO slo_history
+                        (run_id, timestamp, dataset_name, slo_name, operator,
+                         target_value, observed_value, status, error_budget_burn, metadata)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                        """,
+                        (
+                            run_id,
+                            datetime.now(timezone.utc),
+                            dataset_name,
+                            result.get("slo_name"),
+                            result.get("operator"),
+                            result.get("target"),
+                            result.get("observed"),
+                            result.get("status", "UNKNOWN"),
+                            float(result.get("error_budget_burn", 0.0)),
+                            json.dumps(result.get("metadata", {})),
+                        ),
+                    )
+
+    @staticmethod
+    def _safe_metric_suffix(column_name: Any) -> str:
+        """Normalize column names for stable metric ids."""
+        value = str(column_name).strip().replace(" ", "_")
+        return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in value)
+
+    def _normalize_metric_inputs(
+        self, metrics: Dict[str, Union[float, Dict[str, Any]]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Normalize incoming metric payloads into a typed structure.
+        Non-numeric values are skipped.
+        """
+        normalized: Dict[str, Dict[str, Any]] = {}
+        for metric_name, raw_value in metrics.items():
+            payload: Dict[str, Any]
+            if isinstance(raw_value, dict):
+                payload = dict(raw_value)
+                value = payload.get("value")
+            else:
+                payload = {}
+                value = raw_value
+
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                continue
+
+            normalized[metric_name] = {
+                "value": numeric_value,
+                "metric_group": payload.get("metric_group", "general"),
+                "column_name": payload.get("column_name"),
+                "segment": payload.get("segment", "global"),
+                "tags": payload.get("tags", {}) if isinstance(payload.get("tags", {}), dict) else {},
+            }
+        return normalized
+
+    def _collect_dataframe_metrics(self, dataframe: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+        """
+        Derive a richer metric set from the current dataframe.
+        Keeps metric names backward-compatible (e.g. null_rate_email, mean_amount).
+        """
+        metrics: Dict[str, Dict[str, Any]] = {}
+        row_count = float(len(dataframe))
+        metrics["row_count"] = {
+            "value": row_count,
+            "metric_group": "volume",
+            "segment": "global",
+            "tags": {"source": "dataframe"},
+        }
+
+        if row_count <= 0:
+            return metrics
+
+        duplicate_rate = float(dataframe.duplicated().mean())
+        metrics["duplicate_rate"] = {
+            "value": duplicate_rate,
+            "metric_group": "uniqueness",
+            "segment": "global",
+            "tags": {"source": "dataframe"},
+        }
+
+        columns = list(dataframe.columns)[: self.max_profiled_columns]
+        numeric_cols = list(dataframe.select_dtypes(include=[np.number]).columns)
+
+        for col in columns:
+            safe_col = self._safe_metric_suffix(col)
+            null_rate = float(dataframe[col].isnull().mean())
+            distinct_ratio = float(dataframe[col].nunique(dropna=True) / max(1, len(dataframe)))
+
+            metrics[f"null_rate_{safe_col}"] = {
+                "value": null_rate,
+                "metric_group": "completeness",
+                "column_name": str(col),
+                "segment": "global",
+                "tags": {"source": "dataframe"},
+            }
+            metrics[f"distinct_ratio_{safe_col}"] = {
+                "value": distinct_ratio,
+                "metric_group": "uniqueness",
+                "column_name": str(col),
+                "segment": "global",
+                "tags": {"source": "dataframe"},
+            }
+
+        for col in numeric_cols[: self.max_profiled_columns]:
+            safe_col = self._safe_metric_suffix(col)
+            numeric_series = pd.to_numeric(dataframe[col], errors="coerce").dropna()
+            if numeric_series.empty:
+                continue
+
+            metrics[f"mean_{safe_col}"] = {
+                "value": float(numeric_series.mean()),
+                "metric_group": "distribution",
+                "column_name": str(col),
+                "segment": "global",
+                "tags": {"source": "dataframe"},
+            }
+            metrics[f"std_{safe_col}"] = {
+                "value": float(numeric_series.std(ddof=0)),
+                "metric_group": "distribution",
+                "column_name": str(col),
+                "segment": "global",
+                "tags": {"source": "dataframe"},
+            }
+            metrics[f"p95_{safe_col}"] = {
+                "value": float(np.percentile(numeric_series, 95)),
+                "metric_group": "distribution",
+                "column_name": str(col),
+                "segment": "global",
+                "tags": {"source": "dataframe"},
+            }
+
+        return metrics
+
+    def _get_baseline_values(self, dataset_name: str, metric_name: str) -> Tuple[List[float], str]:
+        """
+        Fetch baseline history values.
+        Prefers same-day-of-week history, then falls back to global history.
+        """
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                current_day = datetime.now().weekday()
+                cur.execute(
+                    """
+                    SELECT metric_value
+                    FROM metric_history
+                    WHERE dataset_name = %s
+                      AND metric_name = %s
+                      AND day_of_week = %s
+                    ORDER BY timestamp DESC
+                    LIMIT 90
+                    """,
+                    (dataset_name, metric_name, current_day),
+                )
+                seasonal_values = [float(row[0]) for row in cur.fetchall() if row[0] is not None]
+                if len(seasonal_values) >= 3:
+                    return seasonal_values, "seasonal"
+
+                cur.execute(
+                    """
+                    SELECT metric_value
+                    FROM metric_history
+                    WHERE dataset_name = %s
+                      AND metric_name = %s
+                    ORDER BY timestamp DESC
+                    LIMIT 90
+                    """,
+                    (dataset_name, metric_name),
+                )
+                global_values = [float(row[0]) for row in cur.fetchall() if row[0] is not None]
+                if len(global_values) >= 3:
+                    return global_values, "global"
+
+        return [], "initializing"
+
+    @staticmethod
+    def _compute_distribution_stats(values: List[float]) -> Dict[str, float]:
+        arr = np.asarray(values, dtype=float)
+        mean = float(np.mean(arr))
+        std_dev = float(np.std(arr, ddof=1)) if len(arr) > 1 else 0.0
+        median = float(np.median(arr))
+        q1 = float(np.percentile(arr, 25))
+        q3 = float(np.percentile(arr, 75))
+        mad = float(np.median(np.abs(arr - median)))
+        return {
+            "mean": mean,
+            "std_dev": std_dev,
+            "median": median,
+            "q1": q1,
+            "q3": q3,
+            "mad": mad,
+            "sample_count": float(len(arr)),
+        }
+
+    def _get_baseline_stats(self, dataset_name: str, metric_name: str) -> Dict[str, Any]:
+        values, baseline_type = self._get_baseline_values(dataset_name, metric_name)
+        if len(values) < 3:
+            return {
+                "mean": 0.0,
+                "std_dev": 0.0,
+                "median": 0.0,
+                "q1": 0.0,
+                "q3": 0.0,
+                "mad": 0.0,
+                "sample_count": 0,
+                "baseline_type": "initializing",
+            }
+
+        stats = self._compute_distribution_stats(values)
+        stats["sample_count"] = int(stats["sample_count"])
+        stats["baseline_type"] = baseline_type
+        return stats
 
     def get_seasonal_baseline(self, dataset_name: str, metric_name: str) -> Tuple[float, float, str]:
         """
@@ -157,53 +409,12 @@ class AnomalyDetector:
             Tuple[mean, std_dev, status]
             status can be: 'seasonal', 'global', 'initializing'
         """
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                current_day = datetime.now().weekday()
-
-                # 1. Try Seasonal History (Same Day of Week)
-                cur.execute("""
-                    SELECT
-                        AVG(metric_value) as mean,
-                        STDDEV_SAMP(metric_value) as std_dev,
-                        COUNT(*) as count
-                    FROM metric_history
-                    WHERE dataset_name = %s
-                      AND metric_name = %s
-                      AND day_of_week = %s
-                """, (dataset_name, metric_name, current_day))
-                result = cur.fetchone()
-                mean, std_dev, count = result
-
-                if count and count >= 3:
-                    if std_dev is None:
-                        std_dev = 0.0
-                    return float(mean), float(std_dev), "seasonal"
-
-                # 2. Fallback to Global History (Last 30 runs regardless of day)
-                cur.execute("""
-                    SELECT
-                        AVG(metric_value) as mean,
-                        STDDEV_SAMP(metric_value) as std_dev,
-                        COUNT(*) as count
-                    FROM (
-                        SELECT metric_value
-                        FROM metric_history
-                        WHERE dataset_name = %s AND metric_name = %s
-                        ORDER BY timestamp DESC
-                        LIMIT 30
-                    ) recent_history
-                """, (dataset_name, metric_name))
-                result = cur.fetchone()
-                mean, std_dev, count = result
-
-                if count and count >= 3:
-                    if std_dev is None:
-                        std_dev = 0.0
-                    return float(mean), float(std_dev), "global"
-
-                # 3. Cold Start / Initializing
-                return 0.0, 0.0, "initializing"
+        stats = self._get_baseline_stats(dataset_name, metric_name)
+        return (
+            float(stats.get("mean", 0.0)),
+            float(stats.get("std_dev", 0.0)),
+            str(stats.get("baseline_type", "initializing")),
+        )
 
     def evaluate_run(self, dataset_name: str, current_metrics: Dict[str, float],
                     dataframe: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
@@ -220,24 +431,23 @@ class AnomalyDetector:
         Returns:
             JSON-compatible dictionary containing the diagnostic report
         """
-        # Calculate distribution drift metrics from dataframe
+        # Calculate richer distribution metrics from dataframe.
         if dataframe is not None:
-            for col in dataframe.columns:
-                null_rate = dataframe[col].isnull().mean()
-                current_metrics[f"{col}_null_rate"] = float(null_rate)
+            derived_metrics = self._collect_dataframe_metrics(dataframe)
+            # Explicitly provided metrics take precedence over inferred ones.
+            for metric_name, payload in derived_metrics.items():
+                if metric_name not in current_metrics:
+                    current_metrics[metric_name] = payload
 
-            numeric_cols = dataframe.select_dtypes(include=[np.number]).columns
-            for col in numeric_cols:
-                col_mean = dataframe[col].mean()
-                if not pd.isna(col_mean):
-                    current_metrics[f"{col}_mean"] = float(col_mean)
+        normalized_metrics = self._normalize_metric_inputs(current_metrics)
 
         report = {
             "dataset": dataset_name,
             "timestamp": datetime.now().isoformat(),
             "status": "PASS",
             "anomalies": [],
-            "metrics": {}
+            "metrics": {},
+            "summary": {},
         }
 
         anomaly_count = 0
@@ -246,59 +456,139 @@ class AnomalyDetector:
         print(f"STATISTICAL ENGINE: Analyzing '{dataset_name}'")
         print("📉" * 40)
 
-        for metric_name, current_value in current_metrics.items():
-            mean, std_dev, baseline_type = self.get_seasonal_baseline(dataset_name, metric_name)
+        for metric_name, payload in normalized_metrics.items():
+            current_value = payload["value"]
+            baseline_stats = self._get_baseline_stats(dataset_name, metric_name)
+            mean = baseline_stats["mean"]
+            std_dev = baseline_stats["std_dev"]
+            median = baseline_stats["median"]
+            mad = baseline_stats["mad"]
+            q1 = baseline_stats["q1"]
+            q3 = baseline_stats["q3"]
+            sample_count = baseline_stats["sample_count"]
+            baseline_type = baseline_stats["baseline_type"]
 
             z_score = 0.0
+            robust_z_score = 0.0
+            iqr_low = None
+            iqr_high = None
             is_anomaly = False
             reason = ""
+            methods_triggered: List[str] = []
 
             if baseline_type == "initializing":
-                reason = "Baseline Initializing (insufficient history)"
-                z_score = 0.0
+                reason = "Baseline initializing (insufficient history)"
             else:
                 if std_dev == 0:
-                    if current_value == mean:
-                        z_score = 0.0
-                    else:
-                        z_score = 10.0 if current_value > mean else -10.0
+                    z_score = 0.0 if current_value == mean else (10.0 if current_value > mean else -10.0)
                 else:
                     z_score = (current_value - mean) / std_dev
 
-                if abs(z_score) > 3.0:
+                if mad == 0:
+                    robust_z_score = 0.0 if current_value == median else (10.0 if current_value > median else -10.0)
+                else:
+                    robust_z_score = (current_value - median) / (1.4826 * mad)
+
+                if sample_count >= 8:
+                    iqr = q3 - q1
+                    if iqr > 0:
+                        iqr_low = q1 - (self.iqr_multiplier * iqr)
+                        iqr_high = q3 + (self.iqr_multiplier * iqr)
+
+                if abs(z_score) > self.z_threshold:
+                    methods_triggered.append("z_score")
+                if abs(robust_z_score) > self.robust_z_threshold:
+                    methods_triggered.append("robust_z")
+                if iqr_low is not None and iqr_high is not None and (
+                    current_value < iqr_low or current_value > iqr_high
+                ):
+                    methods_triggered.append("iqr")
+
+                if methods_triggered:
                     is_anomaly = True
                     anomaly_count += 1
-                    reason = f"CRITICAL ANOMALY: Z-Score {z_score:.2f} > 3.0"
+                    reason = (
+                        f"Anomalous by {', '.join(methods_triggered)} "
+                        f"(z={z_score:.2f}, robust_z={robust_z_score:.2f})"
+                    )
                 else:
-                    reason = f"Normal (Z-Score: {z_score:.2f})"
+                    reason = f"Normal (z={z_score:.2f}, robust_z={robust_z_score:.2f})"
+
+                self.save_learned_threshold(
+                    dataset_name=dataset_name,
+                    metric_name=metric_name,
+                    mean=mean,
+                    std=std_dev,
+                    baseline_type=baseline_type,
+                    sample_count=sample_count,
+                )
 
             metric_data = {
                 "value": current_value,
-                "baseline_mean": float(f"{mean:.2f}"),
-                "baseline_std_dev": float(f"{std_dev:.2f}"),
+                "baseline_mean": float(f"{mean:.4f}"),
+                "baseline_std_dev": float(f"{std_dev:.4f}"),
+                "baseline_median": float(f"{median:.4f}"),
+                "baseline_mad": float(f"{mad:.4f}"),
                 "baseline_type": baseline_type,
-                "z_score": float(f"{z_score:.2f}"),
+                "sample_count": sample_count,
+                "z_score": float(f"{z_score:.4f}"),
+                "robust_z_score": float(f"{robust_z_score:.4f}"),
+                "iqr_bounds": [iqr_low, iqr_high] if iqr_low is not None and iqr_high is not None else None,
+                "methods_triggered": methods_triggered,
                 "is_anomaly": is_anomaly,
-                "reason": reason
+                "reason": reason,
+                "metric_group": payload.get("metric_group", "general"),
+                "column_name": payload.get("column_name"),
+                "segment": payload.get("segment", "global"),
+                "tags": payload.get("tags", {}),
             }
             report["metrics"][metric_name] = metric_data
 
             if is_anomaly:
+                severity = "CRITICAL"
+                if (
+                    abs(metric_data["z_score"]) < self.z_threshold + 0.75
+                    and abs(metric_data["robust_z_score"]) < self.robust_z_threshold + 0.75
+                    and len(methods_triggered) == 1
+                ):
+                    severity = "WARNING"
+
                 report["anomalies"].append({
+                    "metric_name": metric_name,
                     "metric": metric_name,
-                    "severity": "CRITICAL",
+                    "severity": severity,
                     "z_score": metric_data["z_score"],
+                    "robust_z_score": metric_data["robust_z_score"],
+                    "reason": reason,
                     "details": reason,
-                    "context": f"Expected {mean:.2f} ±{3*std_dev:.2f}, got {current_value}"
+                    "methods_triggered": methods_triggered,
+                    "context": (
+                        f"Expected {mean:.2f} ±{3*std_dev:.2f}, got {current_value:.2f}"
+                        if baseline_type != "initializing"
+                        else "Insufficient baseline history"
+                    ),
                 })
                 print(f"🚨 {metric_name}: {reason}")
-                print(f"   Context: {metric_data['reason']} | Expected: {mean:.2f} vs Actual: {current_value}")
+                print(
+                    f"   Context: {metric_data['reason']} | "
+                    f"Expected: {mean:.2f} vs Actual: {current_value:.2f}"
+                )
 
         if anomaly_count > 0:
             report["status"] = "ANOMALY_DETECTED"
             print(f"\n❌ FAILED: Detected {anomaly_count} statistical anomalies")
         else:
             print("\n✅ PASSED: No statistical anomalies detected")
+
+        report["summary"] = {
+            "metrics_checked": len(normalized_metrics),
+            "anomaly_count": anomaly_count,
+            "detectors": {
+                "z_score_threshold": self.z_threshold,
+                "robust_z_threshold": self.robust_z_threshold,
+                "iqr_multiplier": self.iqr_multiplier,
+            },
+        }
 
         print("📉" * 40)
         return report

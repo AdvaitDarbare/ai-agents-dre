@@ -2,79 +2,102 @@
 
 ## System Overview
 
-```
-CSV/Parquet File
+```text
+Data File (CSV/Parquet/JSON)
       |
       v
-[MonitorAgent.evaluate_data_file()]
+File Watcher / API Trigger
       |
-      +---> Stage A:  SchemaValidator    (Hard Gate — blocks on missing cols / type mismatches)
-      +---> Stage A2: DataProfiler       (Value-level quality — null rates, uniqueness, custom SQL)
-      +---> Stage B:  AnomalyDetector    (Soft Gate — z-score vs learned baselines)
-      |         +---> ImpactAnalyzer     (Criticality from lineage — HIGH/LOW determines block vs warn)
-      +---> Stage C:  DorisLoader        (Load to warehouse if PASSED/WARNING)
-      +---> Stage D:  _record_run()      (Persist to PostgreSQL: run_history, metric_history, registry)
-      +---> Stage E:  _enrich_with_llm() (Agno Agent generates human-readable advice)
+      v
+MonitorAgent.evaluate_data_file()
+      |
+      +--> Stage A   SchemaValidator (hard gate)
+      +--> Stage A2  DataProfiler (value-level quality)
+      +--> Stage A3  DimensionScorer (6D weighted score)
+      +--> Stage B   AnomalyDetector (z-score + robust z + IQR)
+      +--> Stage C   Load / Quarantine decision
+      +--> Stage D   Persist run + metrics + baselines + SLO checks
+      +--> Stage E   LLM explanation/advice (Agno)
 ```
 
-## Decision Matrix
+## Core Runtime Components
 
-The MonitorAgent uses a 2-axis decision matrix:
+- `src/api.py`: FastAPI API surface
+- `src/agents/monitor_agent.py`: orchestrator
+- `src/runners/file_watcher.py`: event-driven ingest watcher
+- `src/contracts/store.py`: contract store abstraction (file-backed)
+- `src/tools/*`: validators, profiler, anomaly engine, lineage, remediation
+- `src/utils/database.py`: PostgreSQL pool + schema init
 
-| Z-Score \ Criticality | LOW           | HIGH/CRITICAL  |
-|------------------------|---------------|----------------|
-| > z_critical (default 3.0) | WARNING  | BLOCKED        |
-| > z_warn (default 2.5)     | WARNING  | WARNING        |
-| Below thresholds            | PASSED   | PASSED         |
+## Contract Lifecycle Model
 
-Quality Score also gates:
-- Below `qs_block` (default 50%) -> BLOCKED
-- Below `qs_warn` (default 80%) -> WARNING
+### Path 1: Contract-first (preferred)
 
-Thresholds are configurable per-dataset in `config/expectations/{name}.yaml` under `quality.anomaly_thresholds`.
+1. Dataset contract exists in `config/expectations`
+2. New file arrives
+3. Auto-validation runs
+4. Verdict persisted and surfaced in UI
 
-## Data Flow
+### Path 2: Observation + HITL fallback
 
-### Write Path (evaluation run)
-1. `MonitorAgent.evaluate_data_file()` orchestrates all tools
-2. `AnomalyDetector.evaluate_run()` computes z-scores, saves to `metric_history`, updates `learned_thresholds`
-3. `_record_run()` writes to `run_history`, `dataset_registry`, sends alerts via `AlertRouter`
-4. Verdict JSON logged to `data/history/{date}/{dataset}_{time}.json`
+1. New file arrives with no approved contract
+2. File moved to `data/pending_approval`
+3. Proposal YAML generated in `config/proposals`
+4. Human approves/rejects in UI/API
+5. On approval: contract saved and pending files validated automatically
 
-### Read Path (API/frontend)
-1. FastAPI endpoints in `src/api.py` query PostgreSQL via `get_connection()`
-2. React frontend fetches from `localhost:8000`
-3. Chart components (`frontend/src/components/charts/`) render time-series, quality bars, heatmaps
+## Data Persistence Model
 
-## Tech Stack
+PostgreSQL stores:
 
-### Backend
-- **Python 3.12** — main language
-- **FastAPI** — REST API
-- **psycopg2** — PostgreSQL driver with ThreadedConnectionPool
-- **Agno** — LLM agent framework (wraps OpenAI)
-- **pandas** — data loading and manipulation
-- **DuckDB** — in-memory only for SQL-on-DataFrame in DataProfiler and SchemaValidator
-- **PyYAML** — contract parsing
+- run outcomes (`run_history`)
+- metric time-series (`metric_history`)
+- learned baselines (`learned_thresholds`)
+- SLO checks (`slo_history`)
+- dataset registry (`dataset_registry`)
+- governance and remediation history
 
-### Frontend
-- **React 19** with Vite
-- **Tailwind CSS** with HSL custom properties (primary: `#13c8ec`)
-- **Recharts** — all charts (AreaChart, ComposedChart, LineChart)
-- **Framer Motion** — animations
-- **Lucide React** — icons
-- **Axios** — HTTP client
+DuckDB is used in-memory for profiling/validation workflows only.
 
-### Infrastructure
-- **PostgreSQL 16** (Alpine) via Docker Compose
-- Potential future: Redis for caching, Celery for async scans
+## Decisioning
 
-## Why These Choices
+### Quality gates
 
-| Decision | Rationale |
-|----------|-----------|
-| psycopg2 over SQLAlchemy | Direct control, no ORM overhead, simpler for agents to reason about |
-| Recharts over Tremor | Already in codebase, well-documented, large training corpus |
-| YAML contracts over JSON Schema | Human-readable, easy diffing, already adopted |
-| Monolith App.jsx | Rapid iteration — extract components when they stabilize |
-| PostgreSQL over DuckDB for persistence | Production-ready concurrency, proper transactions, external tool access |
+- Schema-breaking issues: `BLOCKED`
+- Weighted quality score thresholds:
+  - below block threshold -> `BLOCKED`
+  - below warning threshold -> `WARNING`
+
+### Anomaly gates
+
+- Metrics compared against learned baselines
+- Detectors: z-score, robust z-score (MAD), IQR bounds
+- Impact criticality influences final severity handling
+
+### SLO checks
+
+Per-run SLO checks include:
+
+- availability
+- minimum quality score
+- maximum anomaly count
+- freshness SLA (if configured)
+
+## Frontend View Model
+
+`frontend/src/App.jsx` consumes API endpoints and renders:
+
+- Health pulse table
+- Dataset cards (active + pending/unconfigured)
+- Expanded row detail tabs
+  - Data Quality
+  - Anomalies & Violations
+  - SLOs & Budget
+  - Governance & History
+  - Impact Lineage
+
+## Current Constraints
+
+- Single-process orchestrator (no async job queue yet)
+- Monolithic frontend app file (planned extraction)
+- Contract source-of-truth is local filesystem (Git-backed contract store is future path)

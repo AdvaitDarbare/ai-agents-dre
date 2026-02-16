@@ -12,6 +12,7 @@ import uuid
 
 # Import our MonitorAgent
 from src.agents.monitor_agent import MonitorAgent
+from src.contracts.store import FileContractStore
 from src.utils.database import get_connection, init_tables
 
 load_dotenv()
@@ -29,6 +30,10 @@ class ContractProposeRequest(BaseModel):
     dataset_name: str
     file_path: Optional[str] = None
 
+class ContractApprovalRequest(BaseModel):
+    dataset_name: str
+    approved_yaml: str  # The human-reviewed YAML content
+
 app = FastAPI(title="Agentic DRE API")
 
 # Enable CORS for the React frontend
@@ -41,7 +46,29 @@ app.add_middleware(
 )
 
 # Global instances (simplified for demo)
-agent = MonitorAgent(contracts_path="config/expectations", lineage_path="config/lineage.yaml")
+contract_store = FileContractStore(os.getenv("CONTRACTS_PATH", "config/expectations"))
+agent = MonitorAgent(
+    contracts_path=str(contract_store.root_path),
+    lineage_path="config/lineage.yaml",
+    contract_store=contract_store,
+)
+
+
+def _matches_dataset_artifact(name: str, dataset_name: str) -> bool:
+    """
+    True when a file/table name belongs to the dataset or its timestamped variants.
+    """
+    normalized_name = name.lower()
+    normalized_dataset = dataset_name.lower()
+
+    if normalized_name == normalized_dataset:
+        return True
+
+    for sep in ("_", ".", "-"):
+        if normalized_name.startswith(f"{normalized_dataset}{sep}"):
+            return True
+
+    return False
 
 @app.get("/health")
 def health_check():
@@ -112,6 +139,159 @@ def get_dataset_data(dataset_name: str, limit: int = 100):
         return data
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Dataset file not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/datasets/{dataset_name}")
+def delete_dataset(dataset_name: str):
+    """
+    Hard-delete a dataset and all known local artifacts:
+    - Data files/logs/verdicts
+    - Contract/proposal/history YAML files
+    - PostgreSQL rows across dataset-scoped tables
+    - DuckDB tables in local *.duckdb/*.db files (if present)
+    """
+    dataset_name = dataset_name.strip()
+    if not dataset_name:
+        raise HTTPException(status_code=400, detail="dataset_name is required")
+
+    deleted_files = []
+    db_deleted_counts = {}
+    duckdb_summary = {}
+
+    def safe_unlink(path: Path):
+        if not path.exists() or not path.is_file():
+            return
+        path.unlink()
+        deleted_files.append(str(path))
+
+    try:
+        # ---------------------------------------------------------
+        # 1) Filesystem cleanup
+        # ---------------------------------------------------------
+        try:
+            contract_file = contract_store.path_for(dataset_name)
+        except ValueError:
+            # Fallback for legacy dataset names containing unsupported characters.
+            contract_file = Path(f"config/expectations/{dataset_name}.yaml")
+
+        explicit_files = [
+            contract_file,
+            Path(f"config/proposals/{dataset_name}.yaml"),
+            Path(f"config/proposals/{dataset_name}.meta.json"),
+            Path(f"data/{dataset_name}.csv"),
+            Path(f"data/{dataset_name}.parquet"),
+            Path(f"data/{dataset_name}.json"),
+            Path(f"data/test/{dataset_name}.csv"),
+            Path(f"data/test/{dataset_name}.parquet"),
+            Path(f"data/test/{dataset_name}.json"),
+        ]
+        for path in explicit_files:
+            safe_unlink(path)
+
+        wildcard_candidates = []
+        wildcard_candidates.extend(contract_store.root_path.glob(f"{dataset_name}.backup_*.yaml"))
+        wildcard_candidates.extend(Path("config/history").glob(f"{dataset_name}_*.yaml"))
+
+        # Data + queue directories where files are named <dataset>_<suffix>.*
+        for directory in (
+            Path("data/landing"),
+            Path("data/pending_approval"),
+            Path("data/quarantine"),
+            Path("data/test"),
+            Path("data"),
+            Path("logs/runs"),
+        ):
+            if not directory.exists():
+                continue
+            for file_path in directory.glob("*"):
+                if file_path.is_file() and _matches_dataset_artifact(file_path.name, dataset_name):
+                    wildcard_candidates.append(file_path)
+
+        # Historical verdict logs are nested by date
+        history_root = Path("data/history")
+        if history_root.exists():
+            for file_path in history_root.rglob("*"):
+                if file_path.is_file() and _matches_dataset_artifact(file_path.name, dataset_name):
+                    wildcard_candidates.append(file_path)
+
+        # De-duplicate candidates before deleting
+        for path in {p.resolve() for p in wildcard_candidates}:
+            safe_unlink(path)
+
+        # ---------------------------------------------------------
+        # 2) PostgreSQL cleanup
+        # ---------------------------------------------------------
+        # Some tables may not exist in all environments. We guard with to_regclass.
+        dataset_tables = [
+            "run_history",
+            "metric_history",
+            "learned_thresholds",
+            "dataset_registry",
+            "schema_audit_log",
+            "remediation_history",
+            "tool_outputs",
+            "contract_versions",
+        ]
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                for table in dataset_tables:
+                    cur.execute("SELECT to_regclass(%s)", (f"public.{table}",))
+                    exists = cur.fetchone()[0] is not None
+                    if not exists:
+                        db_deleted_counts[table] = None
+                        continue
+
+                    cur.execute(f"DELETE FROM {table} WHERE dataset_name = %s", (dataset_name,))
+                    db_deleted_counts[table] = cur.rowcount
+
+        # ---------------------------------------------------------
+        # 3) DuckDB cleanup (if any local DuckDB files exist)
+        # ---------------------------------------------------------
+        duckdb_files = set()
+        for directory in (Path("."), Path("data"), Path("logs")):
+            if not directory.exists():
+                continue
+            duckdb_files.update(directory.glob("*.duckdb"))
+            duckdb_files.update(directory.glob("*.db"))
+
+        if duckdb_files:
+            try:
+                import duckdb
+
+                for db_path in sorted(duckdb_files):
+                    dropped_tables = []
+                    try:
+                        conn = duckdb.connect(str(db_path))
+                        table_rows = conn.execute("SHOW TABLES").fetchall()
+                        for row in table_rows:
+                            table_name = row[0]
+                            if _matches_dataset_artifact(table_name, dataset_name):
+                                conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+                                dropped_tables.append(table_name)
+                        conn.close()
+                    except Exception as duck_err:
+                        duckdb_summary[str(db_path)] = {"error": str(duck_err)}
+                        continue
+
+                    if dropped_tables:
+                        duckdb_summary[str(db_path)] = {"dropped_tables": dropped_tables}
+            except Exception as import_err:
+                duckdb_summary["duckdb_import"] = {"error": str(import_err)}
+
+        return {
+            "status": "deleted",
+            "dataset_name": dataset_name,
+            "deleted_file_count": len(deleted_files),
+            "deleted_files": sorted(deleted_files),
+            "postgres_deleted_rows": db_deleted_counts,
+            "duckdb_cleanup": duckdb_summary,
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -645,21 +825,57 @@ def propose_contract_endpoint(request: ContractProposeRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/contracts/pending")
+def get_pending_contracts():
+    """Get all contracts pending human approval."""
+    try:
+        proposals_dir = Path("config/proposals")
+        pending_dir = Path("data/pending_approval")
+
+        pending_contracts = []
+
+        # Find all proposal files
+        if proposals_dir.exists():
+            for meta_file in proposals_dir.glob("*.meta.json"):
+                dataset_name = meta_file.stem.replace('.meta', '')
+
+                # Read metadata
+                with open(meta_file, 'r') as f:
+                    metadata = json.load(f)
+
+                # Read proposed YAML
+                yaml_file = proposals_dir / f"{dataset_name}.yaml"
+                if yaml_file.exists():
+                    with open(yaml_file, 'r') as f:
+                        proposed_yaml = f.read()
+
+                    # Check if pending files exist
+                    pending_files = list(pending_dir.glob(f"{dataset_name}*"))
+
+                    pending_contracts.append({
+                        "dataset_name": dataset_name,
+                        "proposed_at": metadata.get("proposed_at"),
+                        "source_file": metadata.get("source_file"),
+                        "row_count": metadata.get("row_count"),
+                        "column_count": metadata.get("column_count"),
+                        "proposed_yaml": proposed_yaml,
+                        "pending_files": [f.name for f in pending_files],
+                        "status": metadata.get("status", "pending_approval")
+                    })
+
+        return pending_contracts
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/contracts/{dataset_name}")
 def get_active_contract_endpoint(dataset_name: str):
     """Get the current active contract content."""
     try:
-        datasets = agent.discover_datasets()
-        meta = next((d for d in datasets if d["name"] == dataset_name), None)
-        if not meta:
-            raise HTTPException(status_code=404, detail="Dataset not found")
-        
-        contract_path = meta["contract_path"]
-        if not os.path.exists(contract_path):
-             return {"content": "# No contract found"}
-             
-        with open(contract_path, "r") as f:
-            return {"content": f.read()}
+        doc = contract_store.read(dataset_name)
+        if not doc:
+            return {"content": "# No contract found"}
+        return {"content": doc.content}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -678,7 +894,7 @@ def save_contract_endpoint(request: ContractSaveRequest):
         
         if not meta or not meta.get("contract_path"):
             # Fallback path if not found in metadata
-            contract_path = f"config/expectations/{request.dataset_name}.yaml"
+            contract_path = str(contract_store.path_for(request.dataset_name))
         else:
             contract_path = meta["contract_path"]
 
@@ -706,16 +922,14 @@ def save_contract_endpoint(request: ContractSaveRequest):
 def get_current_contract(dataset_name: str):
     """Get the current active contract YAML content."""
     try:
-        import yaml
-        contract_path = f"config/expectations/{dataset_name}.yaml"
-
-        if not Path(contract_path).exists():
+        doc = contract_store.read(dataset_name)
+        if not doc:
+            contract_path = str(contract_store.path_for(dataset_name))
             raise HTTPException(status_code=404, detail=f"Contract not found: {contract_path}")
 
-        with open(contract_path, 'r') as f:
-            yaml_content = f.read()
-
-        return {"yaml_content": yaml_content, "path": contract_path}
+        return {"yaml_content": doc.content, "path": doc.location}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -786,10 +1000,9 @@ def save_contract_version(dataset_name: str, request: dict):
         if not yaml_content:
             raise HTTPException(status_code=400, detail="yaml_content is required")
 
-        # Save to file
-        contract_path = f"config/expectations/{dataset_name}.yaml"
-        with open(contract_path, 'w') as f:
-            f.write(yaml_content)
+        # Save to active contract store
+        saved = contract_store.write(dataset_name, yaml_content)
+        contract_path = saved.location
 
         # Calculate hash for the content
         import hashlib
@@ -946,7 +1159,8 @@ def get_quality_dimensions(dataset_name: str):
 
                 # psycopg2 automatically parses JSONB to dict
                 return row[0]
-
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -958,7 +1172,8 @@ def get_metric_timeseries(dataset_name: str, metric: str = "row_count", limit: i
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT mh.timestamp, mh.metric_value, mh.run_id, mh.day_of_week
+                    SELECT mh.timestamp, mh.metric_value, mh.run_id, mh.day_of_week,
+                           mh.metric_group, mh.column_name, mh.segment, mh.tags
                     FROM metric_history mh
                     WHERE mh.dataset_name = %s AND mh.metric_name = %s
                     ORDER BY mh.timestamp DESC
@@ -976,15 +1191,17 @@ def get_metric_timeseries(dataset_name: str, metric: str = "row_count", limit: i
 
                 baseline = None
                 if baseline_row:
+                    mean_val = baseline_row[0] or 0.0
+                    std_val = baseline_row[1] or 0.0
                     baseline = {
-                        "mean": baseline_row[0],
-                        "std": baseline_row[1],
+                        "mean": mean_val,
+                        "std": std_val,
                         "type": baseline_row[2],
                         "sample_count": baseline_row[3],
-                        "upper_3sigma": baseline_row[0] + 3 * baseline_row[1],
-                        "lower_3sigma": baseline_row[0] - 3 * baseline_row[1],
-                        "upper_2sigma": baseline_row[0] + 2 * baseline_row[1],
-                        "lower_2sigma": baseline_row[0] - 2 * baseline_row[1],
+                        "upper_3sigma": mean_val + 3 * std_val,
+                        "lower_3sigma": mean_val - 3 * std_val,
+                        "upper_2sigma": mean_val + 2 * std_val,
+                        "lower_2sigma": mean_val - 2 * std_val,
                     }
 
                 return {
@@ -997,6 +1214,10 @@ def get_metric_timeseries(dataset_name: str, metric: str = "row_count", limit: i
                             "value": r[1],
                             "run_id": r[2],
                             "day_of_week": r[3],
+                            "metric_group": r[4],
+                            "column_name": r[5],
+                            "segment": r[6],
+                            "tags": r[7] or {},
                         }
                         for r in reversed(rows)  # chronological order
                     ]
@@ -1027,11 +1248,246 @@ def get_baselines(dataset_name: str):
                         "type": r[3],
                         "last_updated": r[4].isoformat() if r[4] else None,
                         "sample_count": r[5],
-                        "upper_3sigma": r[1] + 3 * r[2] if r[2] else r[1],
-                        "lower_3sigma": r[1] - 3 * r[2] if r[2] else r[1],
+                        "upper_3sigma": (r[1] or 0.0) + 3 * (r[2] or 0.0),
+                        "lower_3sigma": (r[1] or 0.0) - 3 * (r[2] or 0.0),
                     }
                     for r in rows
                 ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/slos/{dataset_name}")
+def get_slo_history(dataset_name: str, limit: int = 100):
+    """Get per-run SLO check history for a dataset."""
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT timestamp, run_id, slo_name, operator,
+                           target_value, observed_value, status, error_budget_burn, metadata
+                    FROM slo_history
+                    WHERE dataset_name = %s
+                    ORDER BY timestamp DESC
+                    LIMIT %s
+                    """,
+                    (dataset_name, limit),
+                )
+                rows = cur.fetchall()
+                return [
+                    {
+                        "timestamp": r[0].isoformat() if r[0] else None,
+                        "run_id": r[1],
+                        "slo_name": r[2],
+                        "operator": r[3],
+                        "target_value": r[4],
+                        "observed_value": r[5],
+                        "status": r[6],
+                        "error_budget_burn": r[7],
+                        "metadata": r[8] or {},
+                    }
+                    for r in rows
+                ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/slos/{dataset_name}/summary")
+def get_slo_summary(dataset_name: str, window: int = 200):
+    """Get SLO attainment summary and error budget burn for a dataset."""
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH recent AS (
+                        SELECT *
+                        FROM slo_history
+                        WHERE dataset_name = %s
+                        ORDER BY timestamp DESC
+                        LIMIT %s
+                    )
+                    SELECT
+                        slo_name,
+                        COUNT(*) AS total_checks,
+                        COUNT(*) FILTER (WHERE status = 'PASS') AS pass_checks,
+                        AVG(error_budget_burn) AS avg_error_budget_burn,
+                        MAX(timestamp) AS last_seen
+                    FROM recent
+                    GROUP BY slo_name
+                    ORDER BY slo_name
+                    """,
+                    (dataset_name, window),
+                )
+                grouped = cur.fetchall()
+
+                cur.execute(
+                    """
+                    WITH recent AS (
+                        SELECT status
+                        FROM slo_history
+                        WHERE dataset_name = %s
+                        ORDER BY timestamp DESC
+                        LIMIT %s
+                    )
+                    SELECT
+                        COUNT(*) AS total_checks,
+                        COUNT(*) FILTER (WHERE status = 'PASS') AS pass_checks
+                    FROM recent
+                    """,
+                    (dataset_name, window),
+                )
+                totals = cur.fetchone()
+                total_checks = int(totals[0] or 0)
+                pass_checks = int(totals[1] or 0)
+
+                return {
+                    "dataset_name": dataset_name,
+                    "window": window,
+                    "overall_pass_rate": round((pass_checks / total_checks) * 100, 2) if total_checks else None,
+                    "total_checks": total_checks,
+                    "checks": [
+                        {
+                            "slo_name": row[0],
+                            "total_checks": row[1],
+                            "pass_checks": row[2],
+                            "pass_rate": round((row[2] / row[1]) * 100, 2) if row[1] else None,
+                            "avg_error_budget_burn": float(row[3]) if row[3] is not None else None,
+                            "last_seen": row[4].isoformat() if row[4] else None,
+                        }
+                        for row in grouped
+                    ],
+                }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/contracts/approve")
+def approve_contract(request: ContractApprovalRequest):
+    """
+    Approve a contract and trigger validation of pending files.
+
+    Flow:
+    1. Save approved YAML to config/expectations/
+    2. Find pending files for this dataset
+    3. Trigger validation on each
+    4. Move from pending_approval to landing or quarantine
+    5. Clean up proposal files
+    """
+    try:
+        dataset_name = request.dataset_name
+        approved_yaml = request.approved_yaml
+
+        # Save approved contract
+        saved_contract = contract_store.write(dataset_name, approved_yaml)
+        contract_path = Path(saved_contract.location)
+
+        print(f"✅ Contract approved and saved: {contract_path}")
+
+        # Find pending files
+        pending_dir = Path("data/pending_approval")
+        pending_files = list(pending_dir.glob(f"{dataset_name}*"))
+
+        validation_results = []
+
+        if pending_files:
+            print(f"📋 Found {len(pending_files)} pending file(s) for validation")
+
+            # Validate each pending file
+            for file_path in pending_files:
+                if '.verdict.' in file_path.name:
+                    continue  # Skip verdict files
+
+                print(f"   Validating: {file_path.name}")
+
+                # Run validation
+                verdict = agent.evaluate_data_file(file_path=str(file_path), dataset_name=dataset_name)
+
+                # Write verdict
+                verdict_path = file_path.with_suffix(file_path.suffix + '.verdict.json')
+                with open(verdict_path, 'w') as f:
+                    json.dump(verdict, f, indent=2)
+
+                # Move file based on verdict
+                if verdict['status'] == 'BLOCKED':
+                    dest_dir = Path("data/quarantine")
+                    dest_dir.mkdir(exist_ok=True)
+                    dest = dest_dir / file_path.name
+                    shutil.move(str(file_path), str(dest))
+                    print(f"   🚫 BLOCKED → Moved to quarantine")
+                else:
+                    dest_dir = Path("data/landing")
+                    dest_dir.mkdir(exist_ok=True)
+                    dest = dest_dir / file_path.name
+                    shutil.move(str(file_path), str(dest))
+                    print(f"   ✅ PASSED → Moved to landing")
+
+                validation_results.append({
+                    "file": file_path.name,
+                    "status": verdict['status'],
+                    "quality_score": verdict.get('quality_score')
+                })
+
+        # Clean up proposal files
+        proposals_dir = Path("config/proposals")
+        proposal_yaml = proposals_dir / f"{dataset_name}.yaml"
+        proposal_meta = proposals_dir / f"{dataset_name}.meta.json"
+
+        if proposal_yaml.exists():
+            proposal_yaml.unlink()
+        if proposal_meta.exists():
+            proposal_meta.unlink()
+
+        return {
+            "status": "approved",
+            "dataset_name": dataset_name,
+            "contract_path": str(contract_path),
+            "validated_files": validation_results,
+            "message": f"Contract approved. Validated {len(validation_results)} pending file(s)."
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/contracts/pending/{dataset_name}")
+def reject_contract_proposal(dataset_name: str):
+    """
+    Reject a contract proposal.
+    Moves pending files to quarantine and removes proposal.
+    """
+    try:
+        # Move pending files to quarantine
+        pending_dir = Path("data/pending_approval")
+        quarantine_dir = Path("data/quarantine")
+        quarantine_dir.mkdir(exist_ok=True)
+
+        pending_files = list(pending_dir.glob(f"{dataset_name}*"))
+        moved_files = []
+
+        for file_path in pending_files:
+            dest = quarantine_dir / file_path.name
+            shutil.move(str(file_path), str(dest))
+            moved_files.append(file_path.name)
+
+        # Remove proposal files
+        proposals_dir = Path("config/proposals")
+        proposal_yaml = proposals_dir / f"{dataset_name}.yaml"
+        proposal_meta = proposals_dir / f"{dataset_name}.meta.json"
+
+        if proposal_yaml.exists():
+            proposal_yaml.unlink()
+        if proposal_meta.exists():
+            proposal_meta.unlink()
+
+        return {
+            "status": "rejected",
+            "dataset_name": dataset_name,
+            "quarantined_files": moved_files,
+            "message": f"Proposal rejected. {len(moved_files)} file(s) moved to quarantine."
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

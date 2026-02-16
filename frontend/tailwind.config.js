@@ -13,8 +13,8 @@ export default {
         background: "hsl(var(--background))",
         foreground: "hsl(var(--foreground))",
         primary: {
-          DEFAULT: "#8b5cf6",  /* Vibrant Violet - DRE Primary */
-          foreground: "#f8fafc", /* Cool Slate 50 */
+          DEFAULT: "hsl(var(--primary))",
+          foreground: "hsl(var(--primary-foreground))",
         },
         secondary: {
           DEFAULT: "hsl(var(--secondary))",
@@ -47,7 +47,9 @@ export default {
         sm: "calc(var(--radius) - 4px)",
       },
       fontFamily: {
-        sans: ["Manrope", "sans-serif"],
+        sans: ["Space Grotesk", "sans-serif"],
+        display: ["Sora", "Space Grotesk", "sans-serif"],
+        mono: ["JetBrains Mono", "monospace"],
       },
     },
   },

@@ -1,73 +1,74 @@
 # Agentic Data Reliability Engineering (DRE) Platform
 
-**Next-generation data observability platform** powered by autonomous AI agents and a modern React frontend. Acts as an intelligent gatekeeper for your data lake and warehouse, ensuring only high-quality, trusted data reaches production.
+An agentic data reliability control plane for local-first data workflows.
 
-## ✨ Key Features
+It validates incoming datasets against contracts, detects anomalies, evaluates SLOs, and routes data through active/pending/quarantine flows with human-in-the-loop (HITL) controls.
 
-### 🎯 6-Dimensional Quality Framework
-- **Completeness**: Null rate tracking, missing value detection
-- **Validity**: Pattern matching, range checks, allowed values
-- **Consistency**: Cross-column validation, referential integrity
-- **Timeliness**: Data freshness monitoring, SLA tracking
-- **Accuracy**: Statistical profiling, outlier detection
-- **Uniqueness**: Duplicate detection, primary key validation
+## Key Capabilities
 
-### 🤖 Agentic Orchestration
-- **Monitor Agent**: Production-grade orchestrator coordinating detection tools via sequential pipeline
-- **LLM Reasoning**: GPT-4o integration for anomaly analysis and remediation suggestions
-- **Smart Triage**: Automated status handling (PASSED, WARNING, BLOCKED) based on criticality
+- Contract-first + HITL fallback lifecycle
+  - Existing contract: auto-validate on ingest
+  - No contract: move file to pending approval and generate proposal YAML
+- Multi-stage reliability pipeline
+  - Schema validation, data profiling, anomaly detection, impact analysis, SLO evaluation
+- Robust anomaly detection
+  - Seasonal/global baselines with z-score, robust z-score (MAD), and IQR checks
+- Expanded metric tracking
+  - Metric metadata (`metric_group`, `column_name`, `segment`, `tags`) for richer observability
+- SLO tracking
+  - Per-run SLO checks and summary endpoints
+  - Frontend SLO summary cards and run-level table in dataset details
+- Governance and remediation
+  - Contract history, rollback, remediation history, and full verdict storage
+- Modern React operations UI
+  - Health pulse, dataset management, incident feed, lineage, contract workflows
 
-### 📊 Multi-Layer Detection
-- **Schema Validation**: Hard gate for column presence, type checks, row count constraints
-- **Data Profiling**: Column-level quality scoring with violation examples
-- **Anomaly Detection**: Z-score based volume/metric drift with seasonality awareness
-- **Impact Analysis**: Lineage-aware criticality assessment for blast radius calculation
+## Architecture (Current)
 
-### 🔧 Automated Remediation
-- **Contract Generator**: AI-powered YAML contract creation from data profiling
-- **Schema Evolution**: Automatic detection and proposal of schema changes
-- **Version Control**: Full history tracking with rollback capabilities
+### Runtime Components
 
-### 🎨 Modern UI
-- **React 19 + Vite**: Lightning-fast frontend with hot reload
-- **Violet Theme**: Professional color scheme with light/dark mode
-- **Interactive Charts**: Quality radar, volume anomalies, drift detection, null heatmaps
-- **Real-time Updates**: Live scan status and quality score tracking
+- Frontend: React 19 + Vite + Tailwind + Recharts + Framer Motion
+- Backend API: FastAPI (`src/api.py`)
+- Orchestrator: `MonitorAgent` (`src/agents/monitor_agent.py`)
+- Event runner: file watcher (`src/runners/file_watcher.py`)
+- Persistence: PostgreSQL 16 (`run_history`, `metric_history`, `learned_thresholds`, `slo_history`, etc.)
+- Profiling/validation engine: DuckDB in-memory + pandas
+- LLM runtime: Agno with OpenAI model adapter
 
-## 🏗️ Architecture
+### Ingestion + Evaluation Flow
 
-### Tech Stack
-- **Frontend**: React 19, Vite, Tailwind CSS, Recharts, Framer Motion
-- **Backend**: FastAPI (Python 3.12), psycopg2
-- **Database**: PostgreSQL 16 (persistent storage), DuckDB (in-memory profiling)
-- **LLM**: OpenAI GPT-4o via Agno SDK
+1. File lands in `data/landing`
+2. File watcher resolves dataset name
+3. If contract exists: run full evaluation pipeline
+4. If no contract: move to `data/pending_approval`, generate proposal in `config/proposals`
+5. On approval: save contract and validate pending files automatically
+6. Persist runs, metrics, baselines, SLO checks, and verdict logs
 
-### Data Flow
-```
-1. Schema Validation → 2. Data Profiling → 3. Anomaly Detection →
-4. Impact Analysis → 5. Load/Quarantine → 6. LLM Reasoning
-```
-
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
+
 - Python 3.12+
 - Node.js 18+
 - Docker (for PostgreSQL)
 
-### 1. Start PostgreSQL
+### 1) Start PostgreSQL
+
 ```bash
 docker-compose up -d
 ```
 
-### 2. Install Python Dependencies
+### 2) Install Python Dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Set Environment Variables
+### 3) Configure Environment
+
 ```bash
 export OPENAI_API_KEY=your_key_here
+export OPENAI_MODEL_NAME=gpt-4o
 export POSTGRES_HOST=localhost
 export POSTGRES_PORT=5432
 export POSTGRES_DB=dre
@@ -75,120 +76,94 @@ export POSTGRES_USER=dre_user
 export POSTGRES_PASSWORD=dre_password
 ```
 
-### 4. Start Backend API
+### 4) Start Backend API
+
 ```bash
 uvicorn src.api:app --reload
-# API available at http://localhost:8000
+# http://localhost:8000
 ```
 
-### 5. Start Frontend
+### 5) Start Frontend
+
 ```bash
 cd frontend
 npm install
 npm run dev
-# UI available at http://localhost:5173
+# http://localhost:5173
 ```
 
-### 6. Run a Scan (CLI)
+### 6) Optional: Start Event-Driven Watcher
+
 ```bash
-python src/main.py
+python3 -m src.runners.file_watcher
 ```
 
-## 📁 Project Structure
+## Notable API Endpoints
 
-```
+- Health + datasets
+  - `GET /health`
+  - `GET /datasets`
+  - `GET /pulse`
+- Evaluation + history
+  - `POST /evaluate/{dataset_name}`
+  - `GET /runs`
+  - `GET /history/{dataset_name}`
+  - `GET /verdict/{run_id}`
+- Contracts + HITL
+  - `GET /contracts/pending`
+  - `POST /contracts/approve`
+  - `DELETE /contracts/pending/{dataset_name}`
+  - `POST /contracts/propose`
+- Metrics + baselines + SLOs
+  - `GET /metrics/{dataset_name}/timeseries`
+  - `GET /baselines/{dataset_name}`
+  - `GET /slos/{dataset_name}`
+  - `GET /slos/{dataset_name}/summary`
+
+See `docs/api.md` for full request/response details.
+
+## Repository Structure
+
+```text
 src/
-  api.py                  # FastAPI backend (all endpoints)
-  main.py                 # CLI entry point
+  api.py
+  main.py
   agents/
-    monitor_agent.py      # Main orchestrator
+    monitor_agent.py
+    file_actuator.py
+  runners/
+    file_watcher.py
   tools/
-    anomaly_detector.py   # Z-score engine (PostgreSQL)
-    data_profiler.py      # Column quality (DuckDB in-memory)
-    schema_validator.py   # Contract validation (DuckDB in-memory)
-    impact_analyzer.py    # Lineage-based blast radius
-    schema_remediator.py  # LLM-powered schema fixes
-    contract_generator.py # AI contract creation
-    dimension_scorer.py   # 6D quality framework
+    anomaly_detector.py
+    data_profiler.py
+    schema_validator.py
+    impact_analyzer.py
+    schema_remediator.py
+    contract_generator.py
+    dimension_scorer.py
+  contracts/
+    store.py
   utils/
-    database.py           # PostgreSQL connection pool
+    database.py
 frontend/
   src/
-    App.jsx               # Main React app (~2400 lines)
-    components/           # Reusable UI components
-    components/charts/    # Visualization components
-    api/index.js          # Axios API client
-config/
-  expectations/*.yaml     # Data contracts per dataset
-  lineage.yaml            # Dependency graph
-  alerts.yaml             # Alert routing rules
+    App.jsx
+    api/index.js
+    components/
 docs/
-  architecture.md         # System design & data flow
-  database.md             # PostgreSQL schema (6 tables)
-  api.md                  # All endpoints with shapes
-  patterns.md             # Coding conventions
-  plan.md                 # Roadmap & tech debt
+  api.md
+  architecture.md
+  database.md
+  file_watcher_guide.md
+  plan.md
 ```
 
-## 📖 Documentation
-
-- **[Architecture Guide](docs/architecture.md)** - System design, tech decisions, data flow
-- **[Database Schema](docs/database.md)** - All 6 PostgreSQL tables with indexes
-- **[API Reference](docs/api.md)** - Every endpoint with request/response shapes
-- **[Coding Patterns](docs/patterns.md)** - Do/don't patterns, conventions
-- **[Implementation Plan](docs/plan.md)** - Current roadmap, completed features, tech debt
-
-## 🎯 Key Design Decisions
-
-- **PostgreSQL** for all persistent storage (not DuckDB)
-- **DuckDB** only for in-memory DataFrame SQL in profiler/validator
-- **React 19** with Vite for modern, fast frontend
-- **psycopg2 ThreadedConnectionPool** for DB connections (not SQLAlchemy)
-- **YAML contracts** in `config/expectations/` define expected schema
-- **Z-score with seasonality** for anomaly detection (compares same day of week)
-
-## 🔮 Roadmap
-
-### Completed ✅
-- [x] 6-dimensional quality framework
-- [x] React frontend with violet theme
-- [x] PostgreSQL integration
-- [x] Real-time dimension scoring
-- [x] Violation examples display
-- [x] Contract governance UI
-- [x] Anomaly detection with baselines
-- [x] Impact lineage visualization
-
-### In Progress 🚧
-- [ ] Advanced drift detection (K-S test, CUSUM)
-- [ ] Streaming data support (Kafka/Pulsar)
-- [ ] Agentic PII detection
-- [ ] Source system notifications
-
-### Planned 📋
-- [ ] Cloud warehouse connectors (Snowflake, BigQuery, Databricks)
-- [ ] Iceberg table support
-- [ ] Custom alert channels (Slack, PagerDuty)
-- [ ] Multi-tenancy support
-
-## 🧪 Running Tests
+## Tests
 
 ```bash
-pytest tests/ -v
+pytest tests -v
 ```
 
-## 🤝 Contributing
-
-This is an agentic codebase following best practices from `.agent/skills/agent_best_practices/`:
-- CLAUDE.md is a table of contents, not a manual
-- All documentation lives in the repo (docs/)
-- Plans are versioned (docs/plan.md)
-- Progressive disclosure pattern for context management
-
-## 📝 License
+## License
 
 MIT
-
----
-
-*Built for modern data teams who value reliability, automation, and speed.*

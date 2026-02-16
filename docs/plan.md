@@ -1,67 +1,67 @@
-# Plan — Current Roadmap & Tech Debt
+# Plan — Roadmap & Tech Debt
 
-Last updated: 2025-02-14
+Last updated: 2026-02-16
 
-## What's Done
+## Recently Completed
 
-### PostgreSQL Migration (Complete)
-- [x] `src/utils/database.py` — connection pool, `init_tables()`, `get_connection()` context manager
-- [x] `docker-compose.yml` — PostgreSQL 16 Alpine
-- [x] `src/tools/anomaly_detector.py` — fully migrated (STDDEV_SAMP, ON CONFLICT upsert, %s params)
-- [x] `src/agents/monitor_agent.py` — migrated `evaluate_all` and `get_run_history`
-- [x] `src/api.py` — all 10+ DuckDB call sites replaced with PostgreSQL
+### Contract Lifecycle + HITL
+- [x] File watcher flow for landing zone ingestion
+- [x] Pending approval queue + proposal generation
+- [x] Contract approve/reject endpoints
+- [x] Contract store abstraction (`src/contracts/store.py`)
 
-### New API Endpoints (Complete)
-- [x] `GET /incidents` — BLOCKED/WARNING runs with severity mapping
-- [x] `GET /metrics/{name}/timeseries` — time-series with baseline confidence bands
-- [x] `GET /baselines/{name}` — all learned thresholds for a dataset
+### Reliability Engine Upgrades
+- [x] Robust anomaly detection (z-score + robust z-score + IQR)
+- [x] Enriched metric history metadata (`metric_group`, `column_name`, `segment`, `tags`)
+- [x] SLO evaluation per run (availability, quality, anomaly count, freshness)
+- [x] SLO persistence + summary APIs (`/slos/*`)
 
-### Frontend Visualization Components (Complete)
-- [x] `VolumeAnomalyChart` — row count time-series with 3-sigma bands (Monte Carlo style)
-- [x] `DriftChart` — distribution drift with 2-sigma warning band (Databricks style)
-- [x] `ColumnQualityBars` — horizontal quality bars per column (Soda/GX style)
-- [x] `NullRateHeatmap` — color-coded null rate grid (Bigeye style)
-- [x] `QualityScoreTrend` — quality over time with warning/block lines (Anomalo style)
-- [x] `SchemaValidationTable` — column-level contract validation detail
-- [x] `IncidentFeed` — filterable incident list with severity badges
+### UI Upgrades
+- [x] Unified datasets workflow with active/unconfigured/pending states
+- [x] Dataset delete action (with backend artifact cleanup)
+- [x] SLO tab in expanded dataset detail (summary cards + tables)
+- [x] Sidebar behavior/polish improvements
 
-### App.jsx Integration (Complete)
-- [x] "Incidents" nav tab added
-- [x] ExpandedRowDetail enhanced with "Anomaly Detection" and "Schema Detail" sub-tabs
-- [x] Quality tab now uses ColumnQualityBars + QualityScoreTrend + NullRateHeatmap
+## Next Priorities
 
-## What's Next
+### P0 (Near-term)
+- [ ] Introduce async job execution for long-running actions (scan, remediation, bulk delete)
+- [ ] Add incident lifecycle model (OPEN/ACK/RESOLVED) + ownership
+- [ ] Add policy engine for action safety gates (auto vs approval-required)
+- [ ] Fix chat API shape consistency (query param vs JSON body paths)
+- [ ] Add automated tests for `/slos/*` and enriched `/metrics/*/timeseries`
 
-### Short-term (Priority)
-- [ ] Extract App.jsx into separate component files (it's ~2400 lines — too large)
-- [ ] Add `requirements.txt` / `pyproject.toml` with `psycopg2-binary` dependency
-- [ ] Add error boundary components in React for graceful failures
-- [ ] Add loading skeletons to chart components for polish
-- [ ] Implement real `GET /metrics/{name}/timeseries` with day_of_week grouping for seasonality
+### P1
+- [ ] Extract `frontend/src/App.jsx` into feature modules/components
+- [ ] Add structured action audit log for all operator/agent actions
+- [ ] Add monitor backtesting harness (false positive / false negative tuning)
+- [ ] Improve baseline models for non-stationary metrics
 
-### Medium-term
-- [ ] Upstream Health Dots component (Monte Carlo lineage style)
-- [ ] Data freshness monitoring (SLA-based, not just file mtime)
-- [ ] Async evaluation with background workers (Celery or similar)
-- [ ] User authentication (JWT or OAuth)
-- [ ] Role-based access to remediation actions
+### P2
+- [ ] Git-backed contract store implementation
+- [ ] Connector strategy for warehouse/cloud integrations
+- [ ] Role-based access control for governance/remediation/delete actions
 
-### Long-term
-- [ ] Multi-tenant dataset isolation
-- [ ] Custom SQL check editor in frontend
-- [ ] Slack/PagerDuty alert integration (currently stubbed in AlertRouter)
-- [ ] Historical trend comparison (week-over-week, month-over-month)
+## Framework Migration Exploration
 
-## Known Tech Debt
+### Current
+- Custom orchestrator (`MonitorAgent`) + Agno for LLM runtime
+
+### Under Evaluation
+- LangGraph for durable HITL action workflows
+- OpenAI Agents SDK for chat/tool orchestration and tracing
+
+### Decision Direction (current)
+- Keep existing runtime for now
+- Pilot LangGraph on one bounded flow: `propose -> approve -> execute -> verify`
+- Optionally migrate chatbot/tool-calling path to OpenAI Agents SDK first
+
+## Technical Debt
 
 | Item | Location | Impact | Notes |
-|------|----------|--------|-------|
-| Monolith App.jsx | `frontend/src/App.jsx` | Maintainability | ~2400 lines, needs component extraction |
-| Old Streamlit dashboard | `src/dashboard/app.py` | Dead code | Still uses DuckDB, not part of React app |
-| Duplicate `discover_datasets()` calls | `src/api.py` | Performance | Several endpoints call it redundantly |
-| Hardcoded data paths | `src/agents/monitor_agent.py` | Fragility | `data/test/`, `data/landing/` hardcoded |
-| No connection retry logic | `src/utils/database.py` | Reliability | Pool fails hard if PG is down at startup |
-| No migration system | `src/utils/database.py` | Schema evolution | `init_tables()` uses IF NOT EXISTS, no ALTER |
-| Chat endpoint re-discovers all datasets | `src/api.py` `/chat` | Latency | Calls `discover_datasets()` on every chat message |
-| No test coverage for new chart endpoints | `src/api.py` | Quality | `/incidents`, `/timeseries`, `/baselines` untested |
-| `SchemaValidationTable` parses YAML with regex | `frontend/src/components/charts/` | Fragility | Should use a proper YAML parser or API endpoint |
+|---|---|---|---|
+| Monolithic frontend shell | `frontend/src/App.jsx` | Maintainability | Large file with mixed concerns |
+| Sync execution path | `src/api.py`, `src/agents/monitor_agent.py` | Reliability | Long tasks still in request path |
+| Limited incident workflow | API + UI | Ops maturity | Lacks ack/ownership/state machine |
+| Incomplete connector abstraction | ingestion/runtime | Product expansion | Local-first currently |
+| Partial docs drift risk | repo docs | Onboarding | Keep docs synced with rapid iteration |

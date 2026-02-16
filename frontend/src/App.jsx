@@ -29,12 +29,14 @@ import {
   FileText,
   Stethoscope,
   Microscope,
-  ChevronLeft,
   Network,
   Plus,
   Server,
   Sun,
   Moon,
+  Bot,
+  User,
+  Trash2,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -71,6 +73,10 @@ import {
   getIncidents,
   getMetricTimeseries,
   getBaselines,
+  getSloHistory,
+  getSloSummary,
+  getPendingContracts,
+  deleteDataset,
 } from "./api";
 
 // Chart Components
@@ -84,6 +90,7 @@ import QualityRadarChart from "./components/charts/QualityRadarChart";
 import ConstraintViolations from "./components/charts/ConstraintViolations";
 import IncidentFeed from "./components/IncidentFeed";
 import ContractGovernance from "./components/ContractGovernance";
+import ContractAssistant from "./components/ContractAssistant";
 
 // --- Modal: Data Profile ---
 const ProfileModal = ({ isOpen, onClose, data }) => {
@@ -221,7 +228,7 @@ const StatCard = ({ title, value, subtext, icon: Icon, color }) => (
         </h3>
       </div>
       <div
-        className={`p-4 rounded-xl ${color} bg-opacity-10 group-hover: scale-110 transition-transform duration-300`}
+        className={`p-4 rounded-xl ${color} bg-opacity-10 group-hover:scale-110 transition-transform duration-300`}
       >
         <Icon className={`w-7 h-7 ${color.replace("bg-", "text-")} `} />
       </div>
@@ -509,6 +516,18 @@ const ContractWizardModal = ({ isOpen, onClose, datasetName, dataset, onSave }) 
   const [proposedYaml, setProposedYaml] = useState("");
   const [aiAnalysis, setAiAnalysis] = useState(null);
 
+  // AI Assistant State
+  const [showAssistant, setShowAssistant] = useState(false);
+  const [assistantMessages, setAssistantMessages] = useState([
+    {
+      role: 'assistant',
+      content: `Hi! I can help you refine this contract. Try commands like:\n\n• "Add email validation pattern"\n• "Make customer_id non-nullable"\n• "Add uniqueness constraint to email"\n• "Explain this contract"\n\nWhat would you like to modify?`
+    }
+  ]);
+  const [assistantInput, setAssistantInput] = useState('');
+  const [assistantLoading, setAssistantLoading] = useState(false);
+  const assistantEndRef = useRef(null);
+
   // Reset on open
   useEffect(() => {
     if (isOpen && datasetName) {
@@ -522,8 +541,8 @@ const ContractWizardModal = ({ isOpen, onClose, datasetName, dataset, onSave }) 
 
       // Step 1: Fetch Profile & Sample
       Promise.all([
-        import("./api").then(api => api.getDatasetProfile(datasetName).catch(e => ({ data: { total_rows: "Unknown", columns: {} } }))),
-        import("./api").then(api => api.getDatasetData(datasetName, 5).catch(e => ({ data: { data: [] } })))
+        import("./api").then((api) => api.getDatasetProfile(datasetName)),
+        import("./api").then((api) => api.getDatasetData(datasetName, 5)),
       ])
         .then(([profileRes, sampleRes]) => {
           setProfileData(profileRes.data);
@@ -569,6 +588,52 @@ const ContractWizardModal = ({ isOpen, onClose, datasetName, dataset, onSave }) 
     }
   };
 
+  const handleAssistantSend = async () => {
+    if (!assistantInput.trim() || assistantLoading) return;
+
+    const userMessage = assistantInput.trim();
+    setAssistantInput('');
+    setAssistantMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+    setAssistantLoading(true);
+
+    try {
+      const api = await import("./api");
+
+      // Check for modification intent
+      if (userMessage.toLowerCase().includes('modify') ||
+          userMessage.toLowerCase().includes('add') ||
+          userMessage.toLowerCase().includes('change') ||
+          userMessage.toLowerCase().includes('update') ||
+          userMessage.toLowerCase().includes('make')) {
+        const result = await api.aiModifyContract(datasetName, userMessage);
+        setProposedYaml(result.contract_yaml);
+        setAssistantMessages(prev => [...prev, {
+          role: 'assistant',
+          content: `✓ Contract updated! I've applied your changes. The YAML editor on the left now reflects the modifications. Anything else?`
+        }]);
+      }
+      // General explanation/chat
+      else {
+        const result = await api.chatWithAssistant(userMessage, { dataset: datasetName, contract: proposedYaml });
+        setAssistantMessages(prev => [...prev, {
+          role: 'assistant',
+          content: result.response || result.message || 'I processed your request.'
+        }]);
+      }
+    } catch (err) {
+      setAssistantMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `Sorry, I encountered an error: ${err.message}`
+      }]);
+    } finally {
+      setAssistantLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    assistantEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [assistantMessages]);
+
   if (!isOpen) return null;
 
   return (
@@ -576,7 +641,7 @@ const ContractWizardModal = ({ isOpen, onClose, datasetName, dataset, onSave }) 
       <motion.div
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
-        className="bg-card rounded-2xl shadow-2xl w-full max-w-5xl h-[80vh] flex flex-col overflow-hidden"
+        className="bg-card rounded-2xl shadow-2xl w-full max-w-7xl h-[90vh] flex flex-col overflow-hidden"
       >
         {/* Header with Steps */}
         <div className="p-6 border-b border-border bg-muted/50 flex justify-between items-center">
@@ -644,16 +709,24 @@ const ContractWizardModal = ({ isOpen, onClose, datasetName, dataset, onSave }) 
                 </div>
                 <div className="p-4 bg-muted/50 border border-border rounded-xl text-center">
                   <div className="text-xs font-bold text-muted-foreground/80 uppercase">Est. Memory</div>
-                  <div className="text-2xl font-black text-foreground">{profileData?.memory_usage_mb?.toFixed(2) || "0.00"} MB</div>
+                  <div className="text-2xl font-black text-foreground">
+                    {typeof profileData?.memory_usage_mb === "number"
+                      ? `${profileData.memory_usage_mb.toFixed(2)} MB`
+                      : "N/A"}
+                  </div>
                 </div>
                 <div className="p-4 bg-muted/50 border border-border rounded-xl text-center">
                   <div className="text-xs font-bold text-muted-foreground/80 uppercase">Infer Quality</div>
-                  <div className="text-2xl font-black text-emerald-500">{profileData?.overall_quality_score?.toFixed(0) || "100"}%</div>
+                  <div className="text-2xl font-black text-emerald-500">
+                    {typeof profileData?.overall_quality_score === "number"
+                      ? `${profileData.overall_quality_score.toFixed(0)}%`
+                      : "N/A"}
+                  </div>
                 </div>
                 <div className="p-4 bg-muted/50 border border-border rounded-xl text-center">
                   <div className="text-xs font-bold text-muted-foreground/80 uppercase">Source Type</div>
                   <div className="text-2xl font-black text-primary">
-                    {dataset?.data_file?.split('.').pop()?.toUpperCase() || 'UNKNOWN'}
+                    {dataset?.data_file?.split(".").pop()?.toUpperCase() || "UNKNOWN"}
                   </div>
                 </div>
               </div>
@@ -691,7 +764,8 @@ const ContractWizardModal = ({ isOpen, onClose, datasetName, dataset, onSave }) 
           {!loading && !error && step === 2 && (
             <div className="h-full flex flex-col">
               <div className="flex-1 flex overflow-hidden">
-                <div className="w-1/3 border-r border-border bg-muted/50 p-6 overflow-y-auto">
+                {/* Left Panel: AI Suggestions */}
+                <div className={`${showAssistant ? 'w-1/4' : 'w-1/3'} border-r border-border bg-muted/50 p-6 overflow-y-auto transition-all duration-300`}>
                   <h4 className="font-bold text-foreground/90 mb-4 flex items-center gap-2">
                     <Sparkles size={16} className="text-primary" /> AI Suggestions
                   </h4>
@@ -712,10 +786,24 @@ const ContractWizardModal = ({ isOpen, onClose, datasetName, dataset, onSave }) 
                     ))}
                   </ul>
                 </div>
-                <div className="w-2/3 flex flex-col bg-zinc-950">
-                  <div className="p-2 border-b border-border bg-muted/50 text-xs font-mono text-muted-foreground/80 flex justify-between">
+
+                {/* Middle Panel: YAML Editor */}
+                <div className={`${showAssistant ? 'w-1/2' : 'w-2/3'} flex flex-col bg-zinc-950 transition-all duration-300`}>
+                  <div className="p-2 border-b border-border bg-muted/50 text-xs font-mono text-muted-foreground/80 flex justify-between items-center">
                     <span>contract.yaml</span>
-                    <span>Editable</span>
+                    <div className="flex items-center gap-2">
+                      <span>Editable</span>
+                      <button
+                        onClick={() => setShowAssistant(!showAssistant)}
+                        className={`px-2 py-1 rounded text-xs font-bold transition-colors ${
+                          showAssistant
+                            ? 'bg-orange-500 text-white'
+                            : 'bg-muted hover:bg-orange-500/20 text-muted-foreground hover:text-orange-500'
+                        }`}
+                      >
+                        {showAssistant ? 'Hide' : 'Show'} AI Assistant
+                      </button>
+                    </div>
                   </div>
                   <textarea
                     className="flex-1 bg-zinc-950 text-green-400 font-mono text-xs p-4 resize-none focus:outline-none"
@@ -724,6 +812,78 @@ const ContractWizardModal = ({ isOpen, onClose, datasetName, dataset, onSave }) 
                     spellCheck="false"
                   />
                 </div>
+
+                {/* Right Panel: AI Assistant Chat */}
+                {showAssistant && (
+                  <div className="w-1/4 border-l border-border bg-card flex flex-col">
+                    <div className="px-4 py-3 border-b border-border bg-muted/30">
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="text-orange-500" size={16} />
+                        <h4 className="font-bold text-sm">AI Assistant</h4>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">Ask me to modify the contract</p>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
+                      {assistantMessages.map((msg, idx) => (
+                        <div key={idx} className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : ''}`}>
+                          {msg.role === 'assistant' && (
+                            <div className="w-6 h-6 rounded-full bg-orange-500/20 flex items-center justify-center flex-shrink-0">
+                              <Bot size={12} className="text-orange-500" />
+                            </div>
+                          )}
+                          <div className={`max-w-[85%] px-3 py-2 rounded-lg ${
+                            msg.role === 'user'
+                              ? 'bg-orange-500 text-white'
+                              : 'bg-muted/50'
+                          }`}>
+                            <div className="whitespace-pre-wrap">{msg.content}</div>
+                          </div>
+                          {msg.role === 'user' && (
+                            <div className="w-6 h-6 rounded-full bg-blue-500/20 flex items-center justify-center flex-shrink-0">
+                              <User size={12} className="text-blue-500" />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      {assistantLoading && (
+                        <div className="flex gap-2">
+                          <div className="w-6 h-6 rounded-full bg-orange-500/20 flex items-center justify-center">
+                            <Bot size={12} className="text-orange-500 animate-pulse" />
+                          </div>
+                          <div className="bg-muted/50 px-3 py-2 rounded-lg">
+                            <div className="flex gap-1">
+                              <span className="w-1.5 h-1.5 bg-orange-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                              <span className="w-1.5 h-1.5 bg-orange-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                              <span className="w-1.5 h-1.5 bg-orange-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      <div ref={assistantEndRef} />
+                    </div>
+
+                    <div className="p-3 border-t border-border bg-muted/30">
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={assistantInput}
+                          onChange={(e) => setAssistantInput(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && handleAssistantSend()}
+                          placeholder="Add email validation..."
+                          className="flex-1 px-2 py-1.5 text-xs bg-card rounded border border-border focus:outline-none focus:ring-1 focus:ring-orange-500"
+                        />
+                        <button
+                          onClick={handleAssistantSend}
+                          disabled={assistantLoading || !assistantInput.trim()}
+                          className="px-2 py-1.5 bg-orange-500 text-white rounded hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <Send size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1277,7 +1437,117 @@ const DataPreviewModal = ({ isOpen, onClose, datasetName }) => {
 };
 
 // --- Tab: Datasets Overview ---
-const DatasetsTab = ({ datasets, onProfile, onGenerateContract, previewDataset, setPreviewDataset }) => {
+const DatasetsTab = ({
+  datasets,
+  onProfile,
+  onGenerateContract,
+  onDeleteDataset,
+  deletingDatasets,
+  previewDataset,
+  setPreviewDataset,
+  pendingContracts,
+}) => {
+  const datasetNames = new Set(datasets.map((ds) => ds.name));
+  const unmanagedDatasets = datasets.filter((ds) => ds.lifecycle === "unconfigured");
+  const pendingOnlyContracts = pendingContracts.filter(
+    (proposal) => !datasetNames.has(proposal.dataset_name),
+  );
+  const contractActionDatasets = Array.from(
+    new Set([
+      ...unmanagedDatasets.map((ds) => ds.name),
+      ...pendingOnlyContracts.map((proposal) => proposal.dataset_name),
+    ]),
+  );
+
+  const renderUnmanagedCard = (ds, pendingProposal = null, keyOverride = null) => {
+    const dataPath = ds.data_file || pendingProposal?.source_file || "";
+    const fileType = dataPath.includes(".")
+      ? dataPath.split(".").pop().toUpperCase()
+      : "UNKNOWN";
+    const pendingFilesCount = pendingProposal?.pending_files?.length || 0;
+    const isDeleting = deletingDatasets.has(ds.name);
+
+    return (
+      <motion.div
+        whileHover={{ y: -5 }}
+        key={keyOverride || ds.name}
+        className="bg-muted/50 rounded-3xl border-2 border-dashed border-border shadow-sm flex flex-col h-full text-foreground"
+      >
+        <div className="p-6 border-b border-dashed border-border flex justify-between items-start">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-orange-50 flex items-center justify-center text-orange-400">
+              <FileText size={20} />
+            </div>
+            <div>
+              <h4 className="font-bold text-md tracking-tight text-muted-foreground">
+                {ds.name}
+              </h4>
+              <span className="text-[10px] font-bold text-orange-600 uppercase tracking-widest flex items-center gap-1">
+                <Sparkles size={10} />
+                {pendingProposal ? "Pending Approval" : "Discovered Source"}
+              </span>
+            </div>
+          </div>
+          <div className="p-1.5 rounded-md bg-muted text-muted-foreground/80">
+            <AlertCircle size={14} />
+          </div>
+        </div>
+
+        <div className="p-6 flex-1 flex flex-col items-center justify-center text-center space-y-3">
+          <p className="text-xs text-muted-foreground font-medium">
+            {pendingProposal
+              ? "Contract proposal exists for this dataset. Regenerate if source format changed."
+              : "Raw file detected in landing zone. No data contract exists yet."}
+          </p>
+          <div className="w-full bg-muted/80 h-px" />
+          <div className="grid grid-cols-2 w-full gap-4 text-left">
+            <div>
+              <p className="text-[10px] font-bold text-muted-foreground/80 uppercase">Format</p>
+              <p className="text-xs font-bold text-foreground/90">{fileType}</p>
+            </div>
+            <div>
+              <p className="text-[10px] font-bold text-muted-foreground/90 uppercase">Status</p>
+              <p className="text-xs font-bold text-foreground/90">
+                {pendingProposal ? "Proposal Ready" : "Unmanaged"}
+              </p>
+            </div>
+          </div>
+          {pendingProposal && (
+            <p className="text-[11px] text-muted-foreground font-medium">
+              {pendingFilesCount} pending file(s) awaiting contract approval
+            </p>
+          )}
+        </div>
+
+        <div className="p-4 bg-muted/50 border-t border-dashed border-border px-6 flex justify-between gap-2">
+          <button
+            onClick={() => setPreviewDataset(ds.name)}
+            disabled={!ds.data_file || !!pendingProposal || isDeleting}
+            className="flex-1 bg-card hover:bg-orange-50 text-muted-foreground hover:text-orange-600 text-xs font-bold py-2.5 rounded-xl shadow-sm border border-border transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:pointer-events-none"
+          >
+            <Table size={14} /> View Data
+          </button>
+          <button
+            onClick={() => onGenerateContract(ds.name)}
+            disabled={isDeleting}
+            className="flex-1 bg-orange-600 hover:bg-orange-700 text-white text-xs font-bold py-2.5 rounded-xl shadow-sm transition-all flex items-center justify-center gap-2"
+          >
+            <Zap size={14} />
+            {pendingProposal ? "Regenerate Contract" : "Generate Contract"}
+          </button>
+          <button
+            onClick={() => onDeleteDataset(ds.name)}
+            disabled={isDeleting}
+            className="px-3 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold py-2.5 rounded-xl shadow-sm border border-rose-200 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:pointer-events-none"
+            title="Delete dataset and all artifacts"
+          >
+            {isDeleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+          </button>
+        </div>
+      </motion.div>
+    );
+  };
+
   return (
     <div className="space-y-8 h-full">
       <DataPreviewModal
@@ -1285,6 +1555,35 @@ const DatasetsTab = ({ datasets, onProfile, onGenerateContract, previewDataset, 
         onClose={() => setPreviewDataset(null)}
         datasetName={previewDataset}
       />
+
+      {/* Contract Action Bar */}
+      {contractActionDatasets.length > 0 && (
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="p-4 bg-orange-500/10 border-2 border-orange-500 rounded-xl space-y-3"
+        >
+          <div className="flex items-center gap-3">
+            <AlertCircle className="text-orange-500" size={24} />
+            <div>
+              <h3 className="font-bold">Datasets Requiring Contracts</h3>
+              <p className="text-sm text-muted-foreground">
+                {contractActionDatasets.length} dataset(s) currently need contract generation or review
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {contractActionDatasets.map((datasetName) => (
+              <span
+                key={datasetName}
+                className="px-3 py-1 text-xs font-bold rounded-full bg-orange-100 text-orange-700 border border-orange-200"
+              >
+                {datasetName}
+              </span>
+            ))}
+          </div>
+        </motion.div>
+      )}
 
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4 bg-card border border-border px-4 py-2 rounded-2xl shadow-sm w-96">
@@ -1300,65 +1599,10 @@ const DatasetsTab = ({ datasets, onProfile, onGenerateContract, previewDataset, 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {datasets.map((ds) => {
           if (ds.lifecycle === "unconfigured") {
-            return (
-              <motion.div
-                whileHover={{ y: -5 }}
-                key={ds.name}
-                className="bg-muted/50 rounded-3xl border-2 border-dashed border-border shadow-sm flex flex-col h-full text-foreground"
-              >
-                <div className="p-6 border-b border-dashed border-border flex justify-between items-start">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-orange-50 flex items-center justify-center text-orange-400">
-                      <FileText size={20} />
-                    </div>
-                    <div>
-                      <h4 className="font-bold text-md tracking-tight text-muted-foreground">
-                        {ds.name}
-                      </h4>
-                      <span className="text-[10px] font-bold text-orange-600 uppercase tracking-widest flex items-center gap-1">
-                        <Sparkles size={10} /> Discovered Source
-                      </span>
-                    </div>
-                  </div>
-                  <div className="p-1.5 rounded-md bg-muted text-muted-foreground/80">
-                    <AlertCircle size={14} />
-                  </div>
-                </div>
-
-                <div className="p-6 flex-1 flex flex-col items-center justify-center text-center space-y-3">
-                  <p className="text-xs text-muted-foreground font-medium">
-                    Raw file detected in landing zone. No data contract exists yet.
-                  </p>
-                  <div className="w-full bg-muted/80 h-px" />
-                  <div className="grid grid-cols-2 w-full gap-4 text-left">
-                    <div>
-                      <p className="text-[10px] font-bold text-muted-foreground/80 uppercase">Format</p>
-                      <p className="text-xs font-bold text-foreground/90">{ds.data_file.split('.').pop().toUpperCase()}</p>
-                    </div>
-                    <div>
-                      <p className="text-[10px] font-bold text-muted-foreground/90 uppercase">Status</p>
-                      <p className="text-xs font-bold text-foreground/90">Unmanaged</p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-4 bg-muted/50 border-t border-dashed border-border px-6 flex justify-between gap-2">
-                  <button
-                    onClick={() => setPreviewDataset(ds.name)}
-                    className="flex-1 bg-card hover:bg-orange-50 text-muted-foreground hover:text-orange-600 text-xs font-bold py-2.5 rounded-xl shadow-sm border border-border transition-all flex items-center justify-center gap-2"
-                  >
-                    <Table size={14} /> View Data
-                  </button>
-                  <button
-                    onClick={() => onGenerateContract(ds.name)}
-                    className="flex-1 bg-orange-600 hover:bg-orange-700 text-white text-xs font-bold py-2.5 rounded-xl shadow-sm transition-all flex items-center justify-center gap-2"
-                  >
-                    <Zap size={14} /> Generate Contract
-                  </button>
-                </div>
-              </motion.div>
-            );
+            const proposal = pendingContracts.find((item) => item.dataset_name === ds.name) || null;
+            return renderUnmanagedCard(ds, proposal);
           }
+          const isDeleting = deletingDatasets.has(ds.name);
 
           return (
             <motion.div
@@ -1454,17 +1698,38 @@ const DatasetsTab = ({ datasets, onProfile, onGenerateContract, previewDataset, 
                   </div>
                 </div>
 
-                <button
-                  onClick={() => setPreviewDataset(ds.name)}
-                  className="w-full bg-card hover:bg-muted/50 text-foreground/90 text-xs font-bold py-2.5 rounded-xl border border-border shadow-sm transition-all flex items-center justify-center gap-2 group"
-                >
-                  <Table size={14} className="group-hover:text-primary transition-colors" />
-                  View Data
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setPreviewDataset(ds.name)}
+                    disabled={isDeleting}
+                    className="flex-1 bg-card hover:bg-muted/50 text-foreground/90 text-xs font-bold py-2.5 rounded-xl border border-border shadow-sm transition-all flex items-center justify-center gap-2 group disabled:opacity-50 disabled:pointer-events-none"
+                  >
+                    <Table size={14} className="group-hover:text-primary transition-colors" />
+                    View Data
+                  </button>
+                  <button
+                    onClick={() => onDeleteDataset(ds.name)}
+                    disabled={isDeleting}
+                    className="px-3 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold py-2.5 rounded-xl shadow-sm border border-rose-200 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:pointer-events-none"
+                    title="Delete dataset and all artifacts"
+                  >
+                    {isDeleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                  </button>
+                </div>
               </div>
             </motion.div>
           );
         })}
+        {pendingOnlyContracts.map((proposal) =>
+          renderUnmanagedCard(
+            {
+              name: proposal.dataset_name,
+              data_file: proposal.source_file || null,
+            },
+            proposal,
+            `pending-${proposal.dataset_name}`,
+          ),
+        )}
       </div>
     </div>
   );
@@ -1475,7 +1740,7 @@ const LineageTab = ({ pulseData, lineageGraph, embedded = false }) => {
   if (!lineageGraph) {
     return (
       <div
-        className={`bg-card rounded-[40px] border border-border shadow-soft h-full flex items-center justify-center p-20 text-slate - 400 ${embedded ? "border-0 shadow-none rounded-none p-10" : ""} `}
+        className={`bg-card rounded-[40px] border border-border shadow-soft h-full flex items-center justify-center p-20 text-muted-foreground ${embedded ? "border-0 shadow-none rounded-none p-10" : ""} `}
       >
         <div className="flex flex-col items-center gap-4">
           <Loader2 size={48} className="animate-spin text-primary/30" />
@@ -1489,14 +1754,14 @@ const LineageTab = ({ pulseData, lineageGraph, embedded = false }) => {
 
   return (
     <div
-      className={`bg-card rounded-[40px] border border-border shadow-soft h-full flex flex-col relative overflow-hidden text-slate - 800 ${embedded ? "border-0 shadow-none rounded-none h-auto" : ""} `}
+      className={`bg-card rounded-[40px] border border-border shadow-soft h-full flex flex-col relative overflow-hidden text-foreground ${embedded ? "border-0 shadow-none rounded-none h-auto" : ""} `}
     >
       {!embedded && (
         <div className="absolute inset-0 bg-[radial-gradient(#f1f5f9_1px,transparent_1px)] [background-size:32px_32px]" />
       )}
 
       <div
-        className={`p-10 relative z-10 flex flex-col h-full overflow-y - auto custom - scrollbar ${embedded ? "p-0 overflow-visible" : ""} `}
+        className={`p-10 relative z-10 flex flex-col h-full overflow-y-auto custom-scrollbar ${embedded ? "p-0 overflow-visible" : ""} `}
       >
         {!embedded && (
           <div className="flex justify-between items-start mb-12 shrink-0">
@@ -1718,20 +1983,26 @@ const ExpandedRowDetail = ({ datasetName, pulseData }) => {
   const [metrics, setMetrics] = useState(null);
   const [history, setHistory] = useState([]);
   const [lineage, setLineage] = useState(null);
+  const [sloSummary, setSloSummary] = useState(null);
+  const [sloHistory, setSloHistory] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const fetchData = async () => {
       setLoading(true);
       try {
-        const [mRes, hRes, lRes] = await Promise.all([
+        const [mRes, hRes, lRes, sloSummaryRes, sloHistoryRes] = await Promise.all([
           getDatasetMetrics(datasetName),
           getHistory(datasetName),
           getLineage(datasetName),
+          getSloSummary(datasetName, 200).catch(() => ({ data: null })),
+          getSloHistory(datasetName, 100).catch(() => ({ data: [] })),
         ]);
         setMetrics(mRes.data);
         setHistory(hRes.data);
         setLineage(lRes.data);
+        setSloSummary(sloSummaryRes.data);
+        setSloHistory(Array.isArray(sloHistoryRes.data) ? sloHistoryRes.data : []);
       } catch (e) {
         console.error("Failed to load details", e);
       } finally {
@@ -1755,6 +2026,7 @@ const ExpandedRowDetail = ({ datasetName, pulseData }) => {
         {[
           { id: "quality", label: "Data Quality", icon: Microscope },
           { id: "anomaly", label: "Anomalies & Violations", icon: Activity },
+          { id: "slos", label: "SLOs & Budget", icon: ShieldCheck },
           { id: "governance", label: "Governance & History", icon: FileText },
           { id: "lineage", label: "Impact Lineage", icon: Share2 },
         ].map((tab) => (
@@ -1803,6 +2075,156 @@ const ExpandedRowDetail = ({ datasetName, pulseData }) => {
             <ConstraintViolations datasetName={datasetName} />
             <VolumeAnomalyChart datasetName={datasetName} />
             <DriftChart datasetName={datasetName} metricName="mean_amount" />
+          </div>
+        )}
+
+        {activeTab === "slos" && (
+          <div className="space-y-6">
+            {(!sloSummary || !Array.isArray(sloSummary.checks) || sloSummary.checks.length === 0) &&
+            sloHistory.length === 0 ? (
+              <div className="p-8 text-center border border-dashed border-border rounded-xl bg-muted/30">
+                <ShieldCheck size={28} className="mx-auto text-muted-foreground/40 mb-3" />
+                <p className="text-sm font-bold text-foreground">No SLO data yet</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Run a scan to generate SLO compliance history.
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                  <div className="bg-card border border-border rounded-xl p-4">
+                    <div className="text-[10px] font-black uppercase tracking-widest text-muted-foreground/80">
+                      Overall Pass Rate
+                    </div>
+                    <div className="mt-2 text-2xl font-black text-foreground">
+                      {typeof sloSummary?.overall_pass_rate === "number"
+                        ? `${sloSummary.overall_pass_rate.toFixed(1)}%`
+                        : "N/A"}
+                    </div>
+                  </div>
+                  <div className="bg-card border border-border rounded-xl p-4">
+                    <div className="text-[10px] font-black uppercase tracking-widest text-muted-foreground/80">
+                      Window Size
+                    </div>
+                    <div className="mt-2 text-2xl font-black text-foreground">
+                      {typeof sloSummary?.window === "number" ? sloSummary.window : "N/A"}
+                    </div>
+                  </div>
+                  <div className="bg-card border border-border rounded-xl p-4">
+                    <div className="text-[10px] font-black uppercase tracking-widest text-muted-foreground/80">
+                      Total Checks
+                    </div>
+                    <div className="mt-2 text-2xl font-black text-foreground">
+                      {typeof sloSummary?.total_checks === "number" ? sloSummary.total_checks : 0}
+                    </div>
+                  </div>
+                  <div className="bg-card border border-border rounded-xl p-4">
+                    <div className="text-[10px] font-black uppercase tracking-widest text-muted-foreground/80">
+                      Recent Failures
+                    </div>
+                    <div className="mt-2 text-2xl font-black text-rose-600">
+                      {sloHistory.filter((row) => row.status !== "PASS").length}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border rounded-xl overflow-hidden shadow-sm">
+                  <div className="px-4 py-3 bg-muted/50 border-b border-border flex items-center justify-between">
+                    <h4 className="text-xs font-black uppercase tracking-wider text-muted-foreground">
+                      SLO Summary
+                    </h4>
+                    <span className="text-[10px] font-bold text-muted-foreground/80">
+                      Aggregated by SLO Name
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-muted/30 text-left text-[10px] uppercase tracking-wider font-black text-muted-foreground/80">
+                        <tr>
+                          <th className="px-4 py-3">SLO</th>
+                          <th className="px-4 py-3">Pass Rate</th>
+                          <th className="px-4 py-3">Pass / Total</th>
+                          <th className="px-4 py-3">Avg Burn</th>
+                          <th className="px-4 py-3">Last Seen</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {(sloSummary?.checks || []).map((row) => (
+                          <tr key={`summary-${row.slo_name}`} className="hover:bg-muted/30 transition-colors">
+                            <td className="px-4 py-3 font-bold">{row.slo_name}</td>
+                            <td className="px-4 py-3">
+                              {typeof row.pass_rate === "number" ? `${row.pass_rate.toFixed(1)}%` : "N/A"}
+                            </td>
+                            <td className="px-4 py-3">
+                              {row.pass_checks ?? 0} / {row.total_checks ?? 0}
+                            </td>
+                            <td className="px-4 py-3">
+                              {typeof row.avg_error_budget_burn === "number"
+                                ? row.avg_error_budget_burn.toFixed(2)
+                                : "0.00"}
+                            </td>
+                            <td className="px-4 py-3 text-muted-foreground/80">
+                              {row.last_seen ? new Date(row.last_seen).toLocaleString() : "-"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="border rounded-xl overflow-hidden shadow-sm">
+                  <div className="px-4 py-3 bg-muted/50 border-b border-border flex items-center justify-between">
+                    <h4 className="text-xs font-black uppercase tracking-wider text-muted-foreground">
+                      Run-Level SLO Checks
+                    </h4>
+                    <span className="text-[10px] font-bold text-muted-foreground/80">
+                      Latest {Math.min(sloHistory.length, 25)} checks
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto max-h-[360px]">
+                    <table className="w-full text-sm">
+                      <thead className="bg-muted/30 text-left text-[10px] uppercase tracking-wider font-black text-muted-foreground/80">
+                        <tr>
+                          <th className="px-4 py-3">Timestamp</th>
+                          <th className="px-4 py-3">SLO</th>
+                          <th className="px-4 py-3">Observed</th>
+                          <th className="px-4 py-3">Target</th>
+                          <th className="px-4 py-3">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {sloHistory.slice(0, 25).map((row, idx) => (
+                          <tr key={`history-${row.run_id || "run"}-${idx}`} className="hover:bg-muted/30 transition-colors">
+                            <td className="px-4 py-3 text-muted-foreground/80">
+                              {row.timestamp ? new Date(row.timestamp).toLocaleString() : "-"}
+                            </td>
+                            <td className="px-4 py-3 font-bold">{row.slo_name || "-"}</td>
+                            <td className="px-4 py-3">
+                              {typeof row.observed_value === "number" ? row.observed_value.toFixed(3) : "-"}
+                            </td>
+                            <td className="px-4 py-3">
+                              {(row.operator || "") + " "}
+                              {typeof row.target_value === "number" ? row.target_value.toFixed(3) : "-"}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${row.status === "PASS"
+                                  ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
+                                  : "bg-rose-100 text-rose-700 border border-rose-200"
+                                  }`}
+                              >
+                                {row.status || "UNKNOWN"}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -1919,7 +2341,9 @@ const App = () => {
 
   // Phase 9 State
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
+  const sidebarCollapseTimer = useRef(null);
   const [scanningDatasets, setScanningDatasets] = useState(new Set());
+  const [deletingDatasets, setDeletingDatasets] = useState(new Set());
   const [previewDataset, setPreviewDataset] = useState(null);
 
   const [isDarkMode, setIsDarkMode] = useState(() => {
@@ -1948,6 +2372,9 @@ const App = () => {
   const [isChatting, setIsChatting] = useState(false);
   const chatEndRef = useRef(null);
 
+  // HITL Contract Approval State
+  const [pendingContracts, setPendingContracts] = useState([]);
+
   useEffect(() => {
     fetchInitialData();
     const interval = setInterval(fetchPulse, 10000); // refresh every 10s
@@ -1955,8 +2382,24 @@ const App = () => {
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (sidebarCollapseTimer.current) {
+        clearTimeout(sidebarCollapseTimer.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages]);
+
+  // Poll for pending contracts every 15 seconds
+  useEffect(() => {
+    fetchPendingContracts();
+    const interval = setInterval(fetchPendingContracts, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
 
   const fetchInitialData = async () => {
     setLoading(true);
@@ -2005,6 +2448,23 @@ const App = () => {
     setExpandedRows(newSet);
   };
 
+  const openSidebar = () => {
+    if (sidebarCollapseTimer.current) {
+      clearTimeout(sidebarCollapseTimer.current);
+      sidebarCollapseTimer.current = null;
+    }
+    setIsSidebarCollapsed(false);
+  };
+
+  const closeSidebar = () => {
+    if (sidebarCollapseTimer.current) {
+      clearTimeout(sidebarCollapseTimer.current);
+    }
+    sidebarCollapseTimer.current = setTimeout(() => {
+      setIsSidebarCollapsed(true);
+    }, 140);
+  };
+
   const handleProposeSave = async (data) => {
     try {
       await saveContract(data); // Assuming saveContract is imported or we use endpoint
@@ -2042,6 +2502,15 @@ const App = () => {
     }
   };
 
+  const fetchPendingContracts = async () => {
+    try {
+      const pending = await getPendingContracts();
+      setPendingContracts(pending);
+    } catch (err) {
+      console.error('Failed to fetch pending contracts:', err);
+    }
+  };
+
   const handleRunCheck = async (name) => {
     setScanningDatasets((prev) => new Set(prev).add(name));
     try {
@@ -2053,6 +2522,31 @@ const App = () => {
       setScanningDatasets((prev) => {
         const next = new Set(prev);
         next.delete(name);
+        return next;
+      });
+    }
+  };
+
+  const handleDeleteDataset = async (datasetName) => {
+    const confirmed = window.confirm(
+      `Delete dataset "${datasetName}" permanently?\n\nThis will remove:\n- data files in landing/pending/quarantine/test\n- contract/proposal/history YAML files\n- dataset logs and verdict history\n- PostgreSQL records\n- matching DuckDB tables (if present)\n\nThis action cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    setDeletingDatasets((prev) => new Set(prev).add(datasetName));
+    try {
+      await deleteDataset(datasetName);
+      if (previewDataset === datasetName) {
+        setPreviewDataset(null);
+      }
+      await Promise.all([fetchInitialData(), fetchPendingContracts()]);
+    } catch (err) {
+      console.error("Dataset deletion failed", err);
+      alert(`Failed to delete dataset: ${err.message}`);
+    } finally {
+      setDeletingDatasets((prev) => {
+        const next = new Set(prev);
+        next.delete(datasetName);
         return next;
       });
     }
@@ -2109,6 +2603,15 @@ const App = () => {
         100
       ).toFixed(1)
       : "N/A";
+  const knownDatasetNames = new Set(allDatasets.map((ds) => ds.name));
+  const contractActionCount = new Set([
+    ...allDatasets
+      .filter((ds) => ds.lifecycle === "unconfigured")
+      .map((ds) => ds.name),
+    ...pendingContracts
+      .filter((proposal) => !knownDatasetNames.has(proposal.dataset_name))
+      .map((proposal) => proposal.dataset_name),
+  ]).size;
 
   const getFreshness = () => {
     if (!pulseData.length) return "N/A";
@@ -2124,31 +2627,27 @@ const App = () => {
   };
 
   return (
-    <div className="flex h-screen bg-background overflow-hidden font-sans text-foreground">
+    <div className="app-shell flex h-screen bg-background overflow-hidden font-sans text-foreground">
       {/* Sidebar */}
       <aside
-        className={`${isSidebarCollapsed ? "w-20" : "w-64"} bg-card border-r border-border flex flex-col z-20 transition-all duration-300 ease-in-out relative`}
+        onMouseEnter={openSidebar}
+        onMouseLeave={closeSidebar}
+        onFocusCapture={openSidebar}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) {
+            closeSidebar();
+          }
+        }}
+        className={`${isSidebarCollapsed ? "w-20" : "w-72"} dre-sidebar bg-card border-r border-border flex flex-col z-20 transition-[width] duration-300 ease-out relative overflow-visible`}
       >
-        {/* Collapse Toggle */}
-        <button
-          onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-          className="absolute -right-3 top-9 bg-background border border-border rounded-full p-1 text-muted-foreground hover:text-primary hover:border-primary shadow-sm z-50"
-        >
-          {isSidebarCollapsed ? (
-            <ChevronRight size={14} />
-          ) : (
-            <ChevronLeft size={14} />
-          )}
-        </button>
-
         <div
           className={`p-6 ${isSidebarCollapsed ? "flex justify-center" : ""} `}
         >
           <div className="flex items-center gap-3 text-foreground font-black text-2xl tracking-tighter">
-            <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center text-primary-foreground border border-primary shadow-lg flex-shrink-0">
+            <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center text-primary-foreground border border-primary/60 shadow-soft flex-shrink-0">
               <ShieldCheck size={24} />
             </div>
-            {!isSidebarCollapsed && <span>DRE.ai</span>}
+            {!isSidebarCollapsed && <span>DataPulse DRE</span>}
           </div>
         </div>
 
@@ -2164,12 +2663,17 @@ const App = () => {
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
-              className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-all duration-200 group ${activeTab === item.id
-                ? "bg-primary text-primary-foreground font-bold shadow-sm"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-all duration-200 group relative ${activeTab === item.id
+                ? "bg-primary text-primary-foreground font-bold shadow-soft ring-1 ring-primary/35"
+                : "text-muted-foreground hover:bg-muted/80 hover:text-foreground"
                 } ${isSidebarCollapsed ? "justify-center" : ""} `}
               title={isSidebarCollapsed ? item.label : ""}
             >
+              {item.id === "datasets" && contractActionCount > 0 && (
+                <span className="absolute -top-1 -right-1 bg-orange-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center font-bold">
+                  {contractActionCount}
+                </span>
+              )}
               <item.icon
                 size={20}
                 className={`${activeTab === item.id ? "stroke-[3px]" : "group-hover:text-primary transition-colors"} flex-shrink-0`}
@@ -2186,9 +2690,9 @@ const App = () => {
 
         <div className="p-6">
           {!isSidebarCollapsed ? (
-            <div className="bg-secondary text-secondary-foreground p-5 rounded-2xl shadow-xl relative overflow-hidden group">
+            <div className="bg-secondary text-secondary-foreground p-5 rounded-2xl border border-border shadow-soft relative overflow-hidden group">
               <div
-                className={`absolute - right-4 - top-4 w-20 h-20 rounded-full blur-2xl transition-all duration-500 ${systemHealth.every((s) => s.upstream === "UP")
+                className={`absolute -right-4 -top-4 w-20 h-20 rounded-full blur-2xl transition-all duration-500 ${systemHealth.every((s) => s.upstream === "UP")
                   ? "bg-green-500/20 group-hover:bg-green-500/40"
                   : "bg-rose-500/20 group-hover:bg-rose-500/40"
                   } `}
@@ -2239,7 +2743,17 @@ const App = () => {
           isOpen={isProposeModalOpen}
           onClose={() => setIsProposeModalOpen(false)}
           datasetName={selectedDataset}
-          dataset={allDatasets.find(d => d.name === selectedDataset)}
+          dataset={
+            allDatasets.find((d) => d.name === selectedDataset) ||
+            (() => {
+              const pending = pendingContracts.find(
+                (p) => p.dataset_name === selectedDataset,
+              );
+              return pending
+                ? { name: pending.dataset_name, data_file: pending.source_file || null }
+                : null;
+            })()
+          }
           onSave={handleProposeSave}
         />
 
@@ -2264,7 +2778,7 @@ const App = () => {
           data={profileData}
         />
 
-        <header className="h-20 border-b border-border bg-background/80 backdrop-blur-md flex items-center justify-between px-10 sticky top-0 z-10">
+        <header className="dre-header h-20 border-b border-border bg-background/80 backdrop-blur-md flex items-center justify-between px-4 md:px-8 xl:px-10 sticky top-0 z-10">
           <div>
             <h2 className="text-xl font-black text-foreground tracking-tight">
               {activeTab === "health" && "Schema Health Pulse"}
@@ -2274,7 +2788,7 @@ const App = () => {
               {activeTab === "connections" && "Source Integrations"}
             </h2>
             <p className="text-[10px] text-muted-foreground font-bold uppercase tracking-widest mt-1">
-              Active Environment: Production-Lakehouse
+              Live Environment: Production Lakehouse
             </p>
           </div>
 
@@ -2288,7 +2802,7 @@ const App = () => {
             <button
               onClick={handleSmartScan}
               disabled={loading}
-              className="bg-slate-900 text-white px-6 py-2.5 rounded-xl text-sm font-black hover:bg-slate-800 transition-all shadow-lg shadow-black/20 flex items-center gap-2 active:scale-95 disabled:opacity-70 disabled:pointer-events-none border border-slate-700/50"
+              className="btn-primary-cta px-6 py-2.5 rounded-xl text-sm font-black transition-all flex items-center gap-2 active:scale-95 disabled:opacity-70 disabled:pointer-events-none"
             >
               <Zap size={16} className="text-primary fill-primary" />
               Smart Scan All
@@ -2313,13 +2827,13 @@ const App = () => {
                 className={isCopilotOpen ? "fill-primary/20" : ""}
               />
               {!isCopilotOpen && (
-                <div className="absolute -top-1 -right-1 w-3 h-3 bg-primary rounded-full border-2 border-white" />
+                <div className="absolute -top-1 -right-1 w-3 h-3 bg-primary rounded-full border-2 border-background" />
               )}
             </button>
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-10 space-y-10 custom-scrollbar">
+        <div className="flex-1 overflow-y-auto p-4 md:p-8 xl:p-10 space-y-10 custom-scrollbar">
           {activeTab === "health" && (
             <>
               {/* Global Run Stats */}
@@ -2397,7 +2911,7 @@ const App = () => {
                               animate={{ opacity: 1, y: 0 }}
                               transition={{ delay: i * 0.1 }}
                               onClick={() => toggleExpand(row.name)}
-                              className={`hover: bg-slate - 50 / 80 transition-all group cursor-pointer ${expandedRows.has(row.name) ? "bg-muted/50" : ""} `}
+                              className={`hover:bg-muted/50 transition-all group cursor-pointer ${expandedRows.has(row.name) ? "bg-muted/50" : ""} `}
                             >
                               <td className="px-8 py-6">
                                 <div className="flex items-center gap-3">
@@ -2552,7 +3066,7 @@ const App = () => {
                                   initial={{ opacity: 0 }}
                                   animate={{ opacity: 1 }}
                                   exit={{ opacity: 0 }}
-                                  key={`${row.name} -detail`}
+                                  key={`${row.name}-detail`}
                                 >
                                   <td
                                     colSpan="7"
@@ -2619,8 +3133,11 @@ const App = () => {
                 setSelectedDataset(name);
                 setIsProposeModalOpen(true);
               }}
+              onDeleteDataset={handleDeleteDataset}
+              deletingDatasets={deletingDatasets}
               previewDataset={previewDataset}
               setPreviewDataset={setPreviewDataset}
+              pendingContracts={pendingContracts}
             />
           )}
           {activeTab === "history" && (
@@ -2708,7 +3225,7 @@ const App = () => {
                   className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"} `}
                 >
                   <div
-                    className={`max-w-[85 %] p-4 rounded-2xl text-sm leading-relaxed shadow-sm ${msg.role === "user"
+                    className={`max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed shadow-sm ${msg.role === "user"
                       ? "bg-primary text-white font-medium rounded-tr-none"
                       : "bg-muted text-foreground/90 font-normal rounded-tl-none border border-border/50"
                       } `}
@@ -2756,6 +3273,7 @@ const App = () => {
           </motion.aside>
         )}
       </AnimatePresence>
+
     </div>
   );
 };

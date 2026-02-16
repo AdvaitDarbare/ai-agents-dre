@@ -176,23 +176,35 @@ class DataContractGenerator:
             )
 
         columns = []
-        type_map = {
-            "int64": "integer",
-            "int32": "integer",
-            "float64": "double",
-            "float32": "double",
-            "bool": "boolean",
-            "datetime64[ns]": "timestamp",
-        }
+        parquet_type_hints: Dict[str, str] = {}
+        parquet_raw_types: Dict[str, str] = {}
+        parquet_metadata_source: Optional[str] = None
+        metadata_warnings: List[str] = []
+
+        if source_path.suffix.lower() == ".parquet":
+            (
+                parquet_type_hints,
+                parquet_raw_types,
+                parquet_metadata_source,
+                metadata_warnings,
+            ) = self._infer_parquet_types(source_path)
 
         for col_name in df.columns:
             dtype = str(df[col_name].dtype)
-            col_type = type_map.get(dtype, "varchar")
+            col_type = parquet_type_hints.get(col_name) or self._map_pandas_type(dtype)
+            if col_name in parquet_type_hints and parquet_metadata_source:
+                inferred_desc = (
+                    f"Inferred from Parquet metadata ({parquet_metadata_source}): "
+                    f"{parquet_raw_types.get(col_name, 'unknown')}"
+                )
+            else:
+                inferred_desc = f"Inferred from source column type: {dtype}"
+
             col_def: Dict[str, Any] = {
                 "name": col_name,
                 "data_type": col_type,
                 "nullable": bool(df[col_name].isnull().any()),
-                "description": f"Inferred from source column type: {dtype}",
+                "description": inferred_desc,
             }
             if col_type in {"integer", "double"}:
                 numeric = pd.to_numeric(df[col_name], errors="coerce").dropna()
@@ -213,13 +225,140 @@ class DataContractGenerator:
             "columns": columns,
         }
         yaml_content = yaml.safe_dump(contract, sort_keys=False)
+        warnings = ["Generated via deterministic fallback."]
+        if source_path.suffix.lower() == ".parquet":
+            if parquet_metadata_source:
+                warnings.append(
+                    f"Parquet types inferred via {parquet_metadata_source} metadata."
+                )
+            else:
+                warnings.append(
+                    "Parquet metadata inference unavailable; used pandas dtype fallback."
+                )
+        warnings.extend(metadata_warnings)
+
         return ContractGenerationResult(
             yaml_content=yaml_content,
             engine="fallback",
             success=True,
             cli_available=False,
-            warnings=["Generated via deterministic fallback (pandas inference)."],
+            warnings=warnings,
         )
+
+    def _infer_parquet_types(
+        self, source_path: Path
+    ) -> tuple[Dict[str, str], Dict[str, str], Optional[str], List[str]]:
+        """
+        Infer Parquet column types using file metadata (pyarrow first, duckdb fallback).
+        Returns:
+            mapped_types: column -> contract type
+            raw_types: column -> metadata type string
+            source: "pyarrow" | "duckdb" | None
+            warnings: non-fatal inference warnings
+        """
+        warnings: List[str] = []
+
+        # 1) Preferred: pyarrow schema metadata
+        try:
+            import pyarrow.parquet as pq  # type: ignore
+
+            parquet_file = pq.ParquetFile(source_path)
+            schema = parquet_file.schema_arrow
+            mapped_types: Dict[str, str] = {}
+            raw_types: Dict[str, str] = {}
+            for field in schema:
+                raw = str(field.type)
+                mapped_types[field.name] = self._map_arrow_type(raw)
+                raw_types[field.name] = raw
+            if mapped_types:
+                return mapped_types, raw_types, "pyarrow", warnings
+        except Exception as exc:
+            warnings.append(f"pyarrow metadata inference failed: {exc}")
+
+        # 2) Fallback: duckdb DESCRIBE read_parquet()
+        try:
+            import duckdb
+            conn = duckdb.connect(":memory:")
+            rows = conn.execute(
+                "DESCRIBE SELECT * FROM read_parquet(?)",
+                [str(source_path)],
+            ).fetchall()
+            conn.close()
+
+            mapped_types = {}
+            raw_types = {}
+            for row in rows:
+                col_name = row[0]
+                raw = str(row[1])
+                mapped_types[col_name] = self._map_duckdb_type(raw)
+                raw_types[col_name] = raw
+            if mapped_types:
+                return mapped_types, raw_types, "duckdb", warnings
+        except Exception as exc:
+            warnings.append(f"duckdb metadata inference failed: {exc}")
+
+        return {}, {}, None, warnings
+
+    @staticmethod
+    def _map_pandas_type(dtype: str) -> str:
+        value = dtype.lower()
+        if value.startswith("datetime64") or value.startswith("timedelta64"):
+            return "timestamp"
+        if value.startswith("int") or value.startswith("uint"):
+            return "integer"
+        if value.startswith("float"):
+            return "double"
+        if value in {"bool", "boolean"}:
+            return "boolean"
+        return "varchar"
+
+    @staticmethod
+    def _map_arrow_type(arrow_type: str) -> str:
+        value = arrow_type.lower()
+        if "timestamp" in value:
+            return "timestamp"
+        if value.startswith("date"):
+            return "date"
+        if value.startswith("int") or value.startswith("uint"):
+            return "integer"
+        if value.startswith("float") or value.startswith("double") or value.startswith("decimal"):
+            return "double"
+        if "bool" in value:
+            return "boolean"
+        if "json" in value:
+            return "json"
+        if "binary" in value:
+            return "blob"
+        return "varchar"
+
+    @staticmethod
+    def _map_duckdb_type(duckdb_type: str) -> str:
+        value = duckdb_type.upper().split("(")[0]
+        if value in {
+            "INTEGER",
+            "BIGINT",
+            "SMALLINT",
+            "TINYINT",
+            "HUGEINT",
+            "UTINYINT",
+            "USMALLINT",
+            "UINTEGER",
+            "UBIGINT",
+        }:
+            return "integer"
+        if value in {"FLOAT", "DOUBLE", "REAL", "DECIMAL"}:
+            return "double"
+        if value in {"BOOLEAN"}:
+            return "boolean"
+        if value in {"DATE"}:
+            return "date"
+        if value in {"TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_NS", "TIMESTAMP_MS", "TIMESTAMP_S"}:
+            return "timestamp"
+        if value in {"JSON"}:
+            return "json"
+        if value in {"BLOB"}:
+            return "blob"
+        return "varchar"
 
     @staticmethod
     def _looks_like_yaml(content: str) -> bool:

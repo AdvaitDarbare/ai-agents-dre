@@ -18,11 +18,13 @@ import os
 import pandas as pd
 import json
 import time
+import re
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 # Tool Imports
+from src.contracts.store import ContractStore, FileContractStore
 from src.tools.contract_diff import merge_contracts
 from src.tools.schema_validator import validate_schema, ValidationResult, ValidationStatus
 from src.tools.anomaly_detector import AnomalyDetector
@@ -44,12 +46,17 @@ class MonitorAgent:
     The Agentic Orchestrator - Coordinates detection, impact analysis, and decision making.
     """
     
-    def __init__(self, contracts_path: str = "config/expectations", 
-                 lineage_path: str = "config/lineage.yaml"):
+    def __init__(
+        self,
+        contracts_path: str = "config/expectations",
+        lineage_path: str = "config/lineage.yaml",
+        contract_store: Optional[ContractStore] = None,
+    ):
         """
         Initialize the Monitor Agent with all sub-tools.
         """
-        self.contracts_path = Path(contracts_path)
+        self.contract_store = contract_store or FileContractStore(contracts_path)
+        self.contracts_path = Path(getattr(self.contract_store, "root_path", contracts_path))
         
         # Initialize Detectors
         # SchemaValidator is functional, so we initiate it per run usually, 
@@ -59,10 +66,10 @@ class MonitorAgent:
         self.impact_analyzer = ImpactAnalyzer(lineage_path)
         self.loader = DorisLoader()
         self.remediator = SchemaRemediator()
-        self.profiler = DataProfiler()
+        self.profiler = DataProfiler(contracts_path=str(self.contracts_path))
         self.system_health = SystemHealthCheck()
         self.alert_router = AlertRouter()
-        self.dimension_scorer = DimensionScorer()  # 6-dimensional quality scoring
+        self.dimension_scorer = None  # Will be created per-dataset with custom weights in evaluate_data_file()
         
         # Initialize the Reasoning Engine (LLM)
         # Using Agno's Agent with OpenAI
@@ -90,14 +97,13 @@ class MonitorAgent:
         observed_yaml = generation.yaml_content
 
         # 2. Check for existing contract
-        contract_file = self.contracts_path / f"{dataset_name}.yaml"
+        existing_contract = self.contract_store.read(dataset_name)
         final_yaml = observed_yaml
         
-        if contract_file.exists():
+        if existing_contract:
             print(f"📄 Found existing contract for {dataset_name}. Merging metadata...")
             try:
-                with open(contract_file, "r") as f:
-                    current_yaml = f.read()
+                current_yaml = existing_contract.content
                 
                 # Merge observed columns/types into current metadata
                 merged_yaml, _ = merge_contracts(current_yaml, observed_yaml)
@@ -134,6 +140,158 @@ class MonitorAgent:
 
         return True, None
 
+    def _parse_duration_to_minutes(self, value: Any) -> Optional[float]:
+        """
+        Parse duration values like '6h', '30m', '1d', or numeric minutes.
+        """
+        if value is None:
+            return None
+
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        text = str(value).strip().lower()
+        if not text:
+            return None
+
+        match = re.match(r"^(\d+(?:\.\d+)?)\s*([mhd])?$", text)
+        if not match:
+            return None
+
+        amount = float(match.group(1))
+        unit = match.group(2) or "m"
+        if unit == "m":
+            return amount
+        if unit == "h":
+            return amount * 60.0
+        if unit == "d":
+            return amount * 1440.0
+        return None
+
+    def _extract_slo_targets(self, contract_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Read SLO targets from the contract with sensible defaults.
+        Supported keys:
+        quality:
+          slos:
+            min_quality_score: 85
+            max_anomaly_count: 0
+            max_freshness_minutes: 360
+            freshness_sla: "6h"
+          freshness_sla: "6h"   # legacy shorthand
+        """
+        quality = contract_data.get("quality", {}) if isinstance(contract_data, dict) else {}
+        slo_cfg = quality.get("slos", {})
+        if not isinstance(slo_cfg, dict):
+            slo_cfg = {}
+
+        freshness_raw = (
+            slo_cfg.get("max_freshness_minutes")
+            if slo_cfg.get("max_freshness_minutes") is not None
+            else slo_cfg.get("freshness_sla")
+        )
+        if freshness_raw is None:
+            freshness_raw = quality.get("freshness_sla")
+
+        return {
+            "min_quality_score": float(slo_cfg.get("min_quality_score", 80.0)),
+            "max_anomaly_count": int(slo_cfg.get("max_anomaly_count", 0)),
+            "freshness_max_minutes": self._parse_duration_to_minutes(freshness_raw),
+            "source": "contract" if bool(slo_cfg or quality.get("freshness_sla")) else "default",
+        }
+
+    def _evaluate_slos(self, dataset_name: str, verdict: Dict[str, Any], file_path: str) -> Dict[str, Any]:
+        """
+        Evaluate per-run SLO compliance and return normalized SLO checks.
+        """
+        contract_data: Dict[str, Any] = {}
+        try:
+            contract_doc = self.contract_store.read(dataset_name)
+            if contract_doc:
+                import yaml as _yaml
+
+                contract_data = _yaml.safe_load(contract_doc.content) or {}
+        except Exception:
+            contract_data = {}
+
+        targets = self._extract_slo_targets(contract_data)
+        checks: List[Dict[str, Any]] = []
+
+        def add_check(name: str, operator: str, target: float, observed: float, metadata: Dict[str, Any]):
+            passed = False
+            if operator == ">=":
+                passed = observed >= target
+            elif operator == "<=":
+                passed = observed <= target
+            checks.append(
+                {
+                    "slo_name": name,
+                    "operator": operator,
+                    "target": float(target),
+                    "observed": float(observed),
+                    "status": "PASS" if passed else "FAIL",
+                    "error_budget_burn": 0.0 if passed else 1.0,
+                    "metadata": metadata,
+                }
+            )
+
+        status = verdict.get("status", "UNKNOWN")
+        add_check(
+            name="availability",
+            operator=">=",
+            target=1.0,
+            observed=1.0 if status != "BLOCKED" else 0.0,
+            metadata={"source": "system", "description": "Run status must not be BLOCKED"},
+        )
+
+        quality_score = verdict.get("profile", {}).get(
+            "weighted_quality_score",
+            verdict.get("profile", {}).get("overall_quality_score", 0.0),
+        )
+        add_check(
+            name="quality_score_min",
+            operator=">=",
+            target=targets["min_quality_score"],
+            observed=quality_score,
+            metadata={"source": targets["source"]},
+        )
+
+        anomaly_count = float(len(verdict.get("anomalies", [])))
+        add_check(
+            name="anomaly_count_max",
+            operator="<=",
+            target=float(targets["max_anomaly_count"]),
+            observed=anomaly_count,
+            metadata={"source": targets["source"]},
+        )
+
+        freshness_target = targets.get("freshness_max_minutes")
+        if freshness_target is not None:
+            freshness_age = None
+            try:
+                freshness_age = max(0.0, (time.time() - Path(file_path).stat().st_mtime) / 60.0)
+            except Exception:
+                freshness_age = None
+
+            if freshness_age is not None:
+                add_check(
+                    name="freshness_age_minutes_max",
+                    operator="<=",
+                    target=float(freshness_target),
+                    observed=float(freshness_age),
+                    metadata={"source": targets["source"]},
+                )
+
+        pass_count = sum(1 for c in checks if c["status"] == "PASS")
+        total = len(checks)
+        return {
+            "dataset_name": dataset_name,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "overall_status": "PASS" if pass_count == total else "FAIL",
+            "pass_rate": round((pass_count / total) * 100, 2) if total else 100.0,
+            "checks": checks,
+        }
+
     def evaluate_data_file(self, file_path: str, dataset_name: str) -> Dict[str, Any]:
         """
         Execute the Sequential Logic Pipeline to evaluate a data file.
@@ -165,9 +323,19 @@ class MonitorAgent:
         }
         
         # 0. Load Data
+        file_ext = Path(file_path).suffix.lower()
+        if file_ext == ".parquet":
+            source_type = "parquet"
+        elif file_ext == ".json":
+            source_type = "json"
+        else:
+            source_type = "csv"
+
         try:
-            if file_path.endswith('.parquet'):
+            if source_type == "parquet":
                 df = pd.read_parquet(file_path)
+            elif source_type == "json":
+                df = pd.read_json(file_path)
             else:
                 df = pd.read_csv(file_path)
         except FileNotFoundError:
@@ -187,14 +355,14 @@ class MonitorAgent:
         # Stage A: Schema Validation (The "Hard" Gate)
         # ---------------------------------------------------------
         print(f"\n🔍 [Stage A] Validating Schema for '{dataset_name}'...")
-        contract_file = self.contracts_path / f"{dataset_name}.yaml"
+        contract_file = self.contract_store.path_for(dataset_name)
 
         # We use the functional wrapper from schema_validator
         # but we need to pass the file_path, not the dataframe directly to the existing tool
         # The existing tool reads the file itself.
         # Ideally, we'd refactor to accept DF, but for now let's pass file path.
         _schema_start = time.time()
-        schema_result = validate_schema(contract_file, file_path, source_type="csv")
+        schema_result = validate_schema(contract_file, file_path, source_type=source_type)
         _schema_duration = int((time.time() - _schema_start) * 1000)
         schema_diff = schema_result.get_schema_diff()
 
@@ -208,6 +376,7 @@ class MonitorAgent:
         
         # Store diff in verdict
         verdict["schema_evolution"] = schema_diff
+        verdict["schema_result"] = schema_result.to_dict() if hasattr(schema_result, "to_dict") else {}
         
         # Logic: Breaking vs Non-Breaking
         if schema_diff["missing_columns"] or schema_diff["type_mismatches"]:
@@ -222,6 +391,22 @@ class MonitorAgent:
             verdict["reason"] = f"Schema Violation: {'; '.join(error_parts)}"
             verdict["actions"] = ["Quarantine", "Fix Schema/Data"]
             verdict["load_status"] = "SKIPPED (Blocked by Agent)"
+
+            # Even on schema-blocking runs, compute and persist a minimal 6D snapshot
+            # so /quality-dimensions can explain *why* the run failed.
+            try:
+                custom_weights = DimensionScorer.load_weights_from_contract(contract_file)
+                dimension_scorer = DimensionScorer(weights=custom_weights)
+                dimension_report = dimension_scorer.calculate_dimension_scores(
+                    dataset_name=dataset_name,
+                    schema_result=verdict["schema_result"],
+                    profile_report={},
+                    anomaly_report={"status": "PASS", "anomalies": [], "metrics": {}},
+                )
+                verdict["quality_dimensions"] = dimension_report.to_dict()
+            except Exception as dim_err:
+                print(f"⚠️ Failed to compute blocked-run dimension scores: {dim_err}")
+
             self._record_run(dataset_name, verdict, file_path, _start_time)
             return self._enrich_with_llm(verdict)
             
@@ -233,8 +418,9 @@ class MonitorAgent:
         import yaml as _yaml
         _contract_data = {}
         try:
-            with open(contract_file, 'r') as _cf:
-                _contract_data = _yaml.safe_load(_cf) or {}
+            contract_doc = self.contract_store.read(dataset_name)
+            if contract_doc:
+                _contract_data = _yaml.safe_load(contract_doc.content) or {}
         except Exception:
             pass
         _thresholds = _contract_data.get("quality", {}).get("anomaly_thresholds", {})
@@ -242,6 +428,7 @@ class MonitorAgent:
         z_critical = _thresholds.get("z_score_critical", 3.0)
         qs_warn = _thresholds.get("quality_score_warn", 80)
         qs_block = _thresholds.get("quality_score_block", 50)
+        slo_targets = self._extract_slo_targets(_contract_data)
 
         # ---------------------------------------------------------
         # Stage A2: Data Profiling (Value-Level Quality)
@@ -273,27 +460,131 @@ class MonitorAgent:
             duration_ms=_profile_duration
         )
 
+        # ---------------------------------------------------------
+        # Stage A3: Calculate 6-Dimensional Quality Scores (EARLY)
+        # ---------------------------------------------------------
+        print(f"\n📊 [Stage A3] Calculating 6-Dimensional Quality Scores...")
+
+        # Load custom weights from YAML contract
+        _weights_start = time.time()
+        custom_weights = DimensionScorer.load_weights_from_contract(contract_file)
+
+        # Initialize scorer with custom or default weights
+        dimension_scorer = DimensionScorer(weights=custom_weights)
+        _weights_duration = int((time.time() - _weights_start) * 1000)
+
+        print(f"   Using {'custom' if custom_weights else 'default'} weights: " +
+              f"Completeness {dimension_scorer.weights['Completeness']*100:.0f}%, " +
+              f"Validity {dimension_scorer.weights['Validity']*100:.0f}%, " +
+              f"Accuracy {dimension_scorer.weights['Accuracy']*100:.0f}%")
+
+        # Calculate dimension scores
+        _dimension_start = time.time()
+        try:
+            dimension_report = dimension_scorer.calculate_dimension_scores(
+                dataset_name=dataset_name,
+                schema_result=schema_result.to_dict() if hasattr(schema_result, 'to_dict') else {},
+                profile_report=verdict.get("profile", {}),
+                anomaly_report={
+                    "status": "PASS",  # Anomaly detection hasn't run yet
+                    "anomalies": [],
+                    "metrics": {}
+                }
+            )
+
+            # Store in verdict for quality gates
+            verdict["quality_dimensions"] = dimension_report.to_dict()
+
+            # Use dimension overall_score as primary quality metric
+            weighted_quality_score = dimension_report.overall_score
+            verdict["profile"]["weighted_quality_score"] = weighted_quality_score
+
+            # Extract dimension breakdown for logging
+            dim_scores = {d.name: d.score for d in dimension_report.dimensions}
+
+            print(f"   Weighted Quality Score: {weighted_quality_score:.1f}% " +
+                  f"(Completeness: {dim_scores.get('Completeness', 0):.0f}%, " +
+                  f"Validity: {dim_scores.get('Validity', 0):.0f}%, " +
+                  f"Accuracy: {dim_scores.get('Accuracy', 0):.0f}%)")
+
+            dimension_scoring_success = True
+
+        except Exception as e:
+            print(f"⚠️  Failed to calculate dimension scores: {e}")
+            # Fallback to old quality score
+            weighted_quality_score = profile_report.overall_quality_score
+            verdict["quality_dimensions"] = None
+            dimension_scoring_success = False
+
+        _dimension_duration = int((time.time() - _dimension_start) * 1000)
+
+        # Log dimension scoring to tool_outputs
+        tool_logger.log_simple(
+            tool_name="dimension_scorer",
+            status="SUCCESS" if dimension_scoring_success else "ERROR",
+            output={
+                "overall_score": weighted_quality_score,
+                "weights_source": "custom" if custom_weights else "default",
+                "dimension_count": 6 if dimension_scoring_success else 0
+            },
+            duration_ms=_dimension_duration
+        )
+
         # Block if quality score is critically low
-        if profile_report.overall_quality_score < qs_block:
+        # Use weighted dimension score if available, fallback to old score
+        effective_quality_score = verdict["profile"].get("weighted_quality_score",
+                                                           profile_report.overall_quality_score)
+        score_type = "Weighted 6D" if "weighted_quality_score" in verdict["profile"] else "Simple average"
+
+        if effective_quality_score < qs_block:
             verdict["status"] = "BLOCKED"
-            verdict["reason"] = f"Data Quality Score critically low: {profile_report.overall_quality_score:.1f}% (threshold: {qs_block}%)"
+            verdict["reason"] = (
+                f"Data Quality Score critically low: {effective_quality_score:.1f}% "
+                f"(threshold: {qs_block}%). Score type: {score_type}"
+            )
             verdict["actions"] = ["Quarantine", "Investigate Value Violations"]
             verdict["load_status"] = "SKIPPED (Quality too low)"
             self._record_run(dataset_name, verdict, file_path, _start_time)
             return self._enrich_with_llm(verdict)
-        elif profile_report.overall_quality_score < qs_warn:
+
+        elif effective_quality_score < qs_warn:
             verdict["status"] = "WARNING"
-            verdict["reason"] = f"Data Quality Score below threshold: {profile_report.overall_quality_score:.1f}% (threshold: {qs_warn}%)"
-        
+            verdict["reason"] = (
+                f"Data Quality Score below threshold: {effective_quality_score:.1f}% "
+                f"(threshold: {qs_warn}%). Score type: {score_type}"
+            )
+
         # ---------------------------------------------------------
         # Stage B: Anomaly Detection (The "Soft" Gate)
         # ---------------------------------------------------------
         print(f"\n📉 [Stage B] Checking Network Anomalies for '{dataset_name}'...")
 
+        anomaly_inputs: Dict[str, Any] = {
+            "row_count": {
+                "value": len(df),
+                "metric_group": "volume",
+                "segment": "global",
+                "tags": {"source": "pipeline"},
+            }
+        }
+        try:
+            freshness_age_minutes = max(0.0, (time.time() - Path(file_path).stat().st_mtime) / 60.0)
+            freshness_payload = {
+                "value": freshness_age_minutes,
+                "metric_group": "freshness",
+                "segment": "global",
+                "tags": {"source": "filesystem"},
+            }
+            if slo_targets.get("freshness_max_minutes") is not None:
+                freshness_payload["tags"]["slo_target_minutes"] = float(slo_targets["freshness_max_minutes"])
+            anomaly_inputs["freshness_age_minutes"] = freshness_payload
+        except Exception:
+            pass
+
         # Run Detection (Pass DF for distribution checks)
         _anomaly_start = time.time()
         anomaly_report = self.anomaly_detector.evaluate_run(dataset_name,
-                                                            {"row_count": len(df)},
+                                                            anomaly_inputs,
                                                             dataframe=df)
         _anomaly_duration = int((time.time() - _anomaly_start) * 1000)
 
@@ -392,22 +683,7 @@ class MonitorAgent:
             verdict["load_status"] = "SKIPPED (Blocked by Agent)"
 
         # ---------------------------------------------------------
-        # Stage D: Calculate 6-Dimensional Quality Scores
-        # ---------------------------------------------------------
-        try:
-            dimension_report = self.dimension_scorer.calculate_dimension_scores(
-                dataset_name=dataset_name,
-                schema_result=schema_result.to_dict() if hasattr(schema_result, 'to_dict') else {},
-                profile_report=verdict.get("profile", {}),
-                anomaly_report={"status": verdict.get("status", "PASS"), "anomalies": verdict.get("anomalies", []), "metrics": verdict.get("metrics", {})}
-            )
-            verdict["quality_dimensions"] = dimension_report.to_dict()
-        except Exception as e:
-            print(f"⚠️  Failed to calculate dimension scores: {e}")
-            verdict["quality_dimensions"] = None
-
-        # ---------------------------------------------------------
-        # Stage E: Record to System Tables & Return Verdict
+        # Stage D: Record to System Tables & Return Verdict
         # ---------------------------------------------------------
         self._record_run(dataset_name, verdict, file_path, _start_time)
         return self._enrich_with_llm(verdict)
@@ -421,6 +697,7 @@ class MonitorAgent:
         quality_score = verdict.get("profile", {}).get("overall_quality_score", 0.0)
         anomaly_count = len(verdict.get("anomalies", []))
         max_z = max((abs(a.get("z_score", 0)) for a in verdict.get("anomalies", [])), default=0.0)
+        verdict["slos"] = self._evaluate_slos(dataset_name, verdict, file_path)
 
         # Use run_id from verdict (generated at pipeline start for tool logging)
         run_id = verdict.get("run_id")
@@ -443,26 +720,58 @@ class MonitorAgent:
             run_id = saved_run_id
             
             # Save metrics to metric_history
-            metrics_dict = {}
+            metrics_payload: Dict[str, Any] = {}
             # Base metrics from Profile (Quality Scores)
             if "profile" in verdict:
-                metrics_dict["quality_score"] = verdict["profile"]["overall_quality_score"]
+                metrics_payload["quality_score"] = {
+                    "value": verdict["profile"]["overall_quality_score"],
+                    "metric_group": "quality",
+                    "segment": "global",
+                    "tags": {"source": "profile"},
+                }
                 # Add column-level scores
                 for col, score in verdict["profile"].get("column_scores", {}).items():
-                    metrics_dict[f"{col}_quality_score"] = score
+                    metrics_payload[f"{col}_quality_score"] = {
+                        "value": score,
+                        "metric_group": "quality",
+                        "column_name": str(col),
+                        "segment": "global",
+                        "tags": {"source": "profile"},
+                    }
             
             # Add Statistical Metrics from Anomaly Detector (Mean, Null Rates, Row Count)
             # This ensures we save everything the detector calculated (including means)
             if "metrics" in verdict:
-                 # Flatten the metric dictionaries to just values
                  for m_name, m_data in verdict["metrics"].items():
                      if isinstance(m_data, dict) and "value" in m_data:
-                         metrics_dict[m_name] = m_data["value"]
+                         metrics_payload[m_name] = {
+                             "value": m_data["value"],
+                             "metric_group": m_data.get("metric_group", "anomaly"),
+                             "column_name": m_data.get("column_name"),
+                             "segment": m_data.get("segment", "global"),
+                             "tags": {
+                                 "baseline_type": m_data.get("baseline_type"),
+                                 "is_anomaly": bool(m_data.get("is_anomaly", False)),
+                                 **(m_data.get("tags", {}) if isinstance(m_data.get("tags"), dict) else {}),
+                             },
+                         }
                      else:
-                         metrics_dict[m_name] = m_data
+                         metrics_payload[m_name] = {
+                             "value": m_data,
+                             "metric_group": "anomaly",
+                             "segment": "global",
+                         }
 
-            if metrics_dict:
-                self.anomaly_detector.save_run_metrics(dataset_name, metrics_dict, run_id=run_id)
+            if metrics_payload:
+                self.anomaly_detector.save_run_metrics(dataset_name, metrics_payload, run_id=run_id)
+
+            slo_checks = verdict.get("slos", {}).get("checks", [])
+            if slo_checks:
+                self.anomaly_detector.save_slo_results(
+                    run_id=run_id,
+                    dataset_name=dataset_name,
+                    slo_results=slo_checks,
+                )
             
             # Update dataset registry
             file_mtime = None
@@ -479,7 +788,7 @@ class MonitorAgent:
             except Exception:
                 criticality = "UNKNOWN"
             
-            contract_path = str(self.contracts_path / f"{dataset_name}.yaml")
+            contract_path = str(self.contract_store.path_for(dataset_name))
             
             # Reads contact info for alerts
             owner = "Unknown"
@@ -562,22 +871,18 @@ class MonitorAgent:
 
     def get_schema_content(self, dataset_name: str) -> str:
         """Read the raw content of a schema file."""
-        path = self.contracts_path / f"{dataset_name}.yaml"
-        if not path.exists():
-            return ""
-        with open(path, "r") as f:
-            return f.read()
+        doc = self.contract_store.read(dataset_name)
+        return doc.content if doc else ""
 
     def remediate_schema(self, dataset_name: str, new_yaml_content: str) -> bool:
         """Overwrite the existing schema with the new agreed-upon contract.
         Creates a backup of the original file before overwriting."""
-        path = self.contracts_path / f"{dataset_name}.yaml"
+        path = self.contract_store.path_for(dataset_name)
         try:
             # SAFETY: Create backup before overwrite
             SchemaRemediator.create_backup(str(path))
             
-            with open(path, "w") as f:
-                f.write(new_yaml_content)
+            self.contract_store.write(dataset_name, new_yaml_content)
             print(f"✅ Schema remediated for {dataset_name}")
             return True
         except Exception as e:
@@ -619,6 +924,58 @@ class MonitorAgent:
         except Exception as e:
             return f"Diagnosis Failed: {e}"
 
+    def _extract_dataset_name_from_stem(self, stem: str) -> str:
+        """
+        Normalize a data filename stem into a logical dataset name.
+        Examples:
+            newdata_2026-02-15 -> newdata
+            orders_latest -> orders
+            yellow_tripdata_2025-01 -> yellow_tripdata_2025-01
+        """
+        parts = stem.split("_")
+        if len(parts) > 1:
+            token = parts[1]
+            if token.replace("-", "").replace(":", "").isdigit():
+                return parts[0]
+            if token in ["latest", "current", "new", "final", "v1", "v2"]:
+                return parts[0]
+        return stem
+
+    def _is_supported_data_file(self, file_path: Path) -> bool:
+        return (
+            file_path.is_file()
+            and file_path.suffix.lower() in [".csv", ".parquet", ".json"]
+            and ".verdict." not in file_path.name
+        )
+
+    def _find_latest_data_file(self, dataset_name: str) -> Optional[str]:
+        """
+        Locate the newest data file for a dataset across common local zones.
+        """
+        search_dirs = [
+            Path("data/landing"),
+            Path("data/pending_approval"),
+            Path("data/test"),
+            Path("data"),
+            Path("data/quarantine"),
+        ]
+        candidates = []
+        for directory in search_dirs:
+            if not directory.exists():
+                continue
+            for file_path in directory.glob("*"):
+                if not self._is_supported_data_file(file_path):
+                    continue
+                logical_name = self._extract_dataset_name_from_stem(file_path.stem)
+                if logical_name == dataset_name:
+                    candidates.append(file_path)
+
+        if not candidates:
+            return None
+
+        latest = max(candidates, key=lambda p: p.stat().st_mtime)
+        return str(latest)
+
     # ---------------------------------------------------------
     # Phase 1: Schema-Level Auto-Discovery
     # ---------------------------------------------------------
@@ -640,7 +997,7 @@ class MonitorAgent:
         from pathlib import Path
         
         datasets = []
-        contract_files = sorted(self.contracts_path.glob("*.yaml"))
+        contract_files = self.contract_store.list_paths()
         
         for contract_file in contract_files:
             # Skip backup files
@@ -667,16 +1024,8 @@ class MonitorAgent:
                 except Exception:
                     pass
                 
-                # Check for data file
-                data_paths = [
-                    Path(f"data/test/{dataset_name}.csv"),
-                    Path(f"data/landing/{dataset_name}_perfect.csv"),
-                ]
-                data_file = None
-                for dp in data_paths:
-                    if dp.exists():
-                        data_file = str(dp)
-                        break
+                # Resolve the latest physical file currently associated with this dataset
+                data_file = self._find_latest_data_file(dataset_name)
                 
                 datasets.append({
                     "name": dataset_name,
@@ -715,7 +1064,7 @@ class MonitorAgent:
         # Phase 1.5: Discover Unmanaged Files (No Contract Yet)
         # -------------------------------------------------------------
         managed_datasets = {d["name"] for d in datasets}
-        data_dirs = ["data/test", "data/landing", "data"]
+        data_dirs = ["data/test", "data/landing", "data/pending_approval", "data"]
         
         for d_dir in data_dirs:
             path = Path(d_dir)
@@ -724,14 +1073,11 @@ class MonitorAgent:
                 
             # Scan for supported data files
             for file_path in path.glob("*"):
-                if file_path.suffix.lower() not in [".csv", ".parquet", ".json"]:
+                if not self._is_supported_data_file(file_path):
                     continue
                     
-                # Extract dataset name from filename (e.g., 'nyc_taxi.csv' -> 'nyc_taxi')
-                # Handle cases like 'nyc_taxi_schema_drift.csv' - basic logic: stem
-                candidate_name = file_path.stem
-                if "_perfect" in candidate_name:
-                    candidate_name = candidate_name.replace("_perfect", "")
+                # Extract stable dataset id (e.g. newdata_2026-02-15 -> newdata)
+                candidate_name = self._extract_dataset_name_from_stem(file_path.stem)
                     
                 # If already managed, skip
                 if candidate_name in managed_datasets:
@@ -810,15 +1156,7 @@ class MonitorAgent:
             # Find data file
             data_file = ds.get("data_file")
             if not data_file:
-                # Try common patterns
-                candidates = [
-                    Path(data_dir) / f"{name}.csv",
-                    Path("data/landing") / f"{name}_perfect.csv",
-                ]
-                for c in candidates:
-                    if c.exists():
-                        data_file = str(c)
-                        break
+                data_file = self._find_latest_data_file(name)
             
             if not data_file:
                 print(f"\n⏭️  Skipping '{name}' (no data file found)")

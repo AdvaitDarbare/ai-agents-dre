@@ -63,6 +63,9 @@ class ProfileReport:
     dataset_name: str
     total_rows: int = 0
     total_columns: int = 0
+
+    # ⚠️  DEPRECATED: Use weighted dimension scores from DimensionScorer instead
+    # Kept for backward compatibility during gradual migration.
     overall_quality_score: float = 100.0
     column_profiles: Dict[str, ColumnProfile] = field(default_factory=dict)
     constraint_violations: List[Dict[str, Any]] = field(default_factory=list)
@@ -549,9 +552,21 @@ class DataProfiler:
     def _calculate_overall_score(self, report: ProfileReport) -> float:
         """
         Calculate the overall quality score for the dataset.
-        
-        Formula: Average of all column quality scores, 
-                 penalized by constraint violations.
+
+        ⚠️  DEPRECATED: This simple averaging approach is superseded by the
+        weighted 6-dimensional quality scoring in DimensionScorer.
+
+        Kept for backward compatibility with:
+        - Legacy tests that assert on this field
+        - Gradual migration path for existing pipelines
+        - Fallback when dimension scoring fails
+
+        NEW CODE SHOULD USE: DimensionScorer.calculate_dimension_scores()
+        which provides industry-standard weighted multi-dimensional scoring.
+
+        Formula: Average of all column quality scores,
+                 penalized by constraint violations (-5% each) and
+                 failed custom checks (-3% each).
         """
         if not report.column_profiles:
             return 100.0

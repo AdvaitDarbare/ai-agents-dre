@@ -73,8 +73,28 @@ def init_tables():
                     dataset_name VARCHAR(255),
                     metric_name VARCHAR(255),
                     metric_value DOUBLE PRECISION,
-                    day_of_week INTEGER
+                    day_of_week INTEGER,
+                    metric_group VARCHAR(64) DEFAULT 'general',
+                    column_name VARCHAR(255),
+                    segment VARCHAR(255) DEFAULT 'global',
+                    tags JSONB DEFAULT '{}'::jsonb
                 )
+            """)
+            cur.execute("""
+                ALTER TABLE metric_history
+                ADD COLUMN IF NOT EXISTS metric_group VARCHAR(64) DEFAULT 'general'
+            """)
+            cur.execute("""
+                ALTER TABLE metric_history
+                ADD COLUMN IF NOT EXISTS column_name VARCHAR(255)
+            """)
+            cur.execute("""
+                ALTER TABLE metric_history
+                ADD COLUMN IF NOT EXISTS segment VARCHAR(255) DEFAULT 'global'
+            """)
+            cur.execute("""
+                ALTER TABLE metric_history
+                ADD COLUMN IF NOT EXISTS tags JSONB DEFAULT '{}'::jsonb
             """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_metrics
@@ -83,6 +103,10 @@ def init_tables():
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_metrics_run
                 ON metric_history(run_id)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_metrics_grouped
+                ON metric_history(dataset_name, metric_group, column_name, timestamp DESC)
             """)
 
             # Run History — structured outcomes per health check run
@@ -100,6 +124,15 @@ def init_tables():
                     dimension_scores JSONB,
                     full_verdict JSONB
                 )
+            """)
+            # Backfill columns for environments created before JSONB fields existed.
+            cur.execute("""
+                ALTER TABLE run_history
+                ADD COLUMN IF NOT EXISTS dimension_scores JSONB
+            """)
+            cur.execute("""
+                ALTER TABLE run_history
+                ADD COLUMN IF NOT EXISTS full_verdict JSONB
             """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_run_history_dataset
@@ -160,6 +193,123 @@ def init_tables():
                     backup_path TEXT,
                     timestamp TIMESTAMPTZ DEFAULT NOW()
                 )
+            """)
+
+            # Tool-level execution traces used by ToolLogger
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tool_outputs (
+                    id SERIAL PRIMARY KEY,
+                    run_id VARCHAR(64),
+                    dataset_name VARCHAR(255),
+                    tool_name VARCHAR(255),
+                    status VARCHAR(32),
+                    output JSONB,
+                    duration_ms INTEGER DEFAULT 0,
+                    timestamp TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                ALTER TABLE tool_outputs
+                ADD COLUMN IF NOT EXISTS run_id VARCHAR(64)
+            """)
+            cur.execute("""
+                ALTER TABLE tool_outputs
+                ADD COLUMN IF NOT EXISTS dataset_name VARCHAR(255)
+            """)
+            cur.execute("""
+                ALTER TABLE tool_outputs
+                ADD COLUMN IF NOT EXISTS tool_name VARCHAR(255)
+            """)
+            cur.execute("""
+                ALTER TABLE tool_outputs
+                ADD COLUMN IF NOT EXISTS status VARCHAR(32)
+            """)
+            cur.execute("""
+                ALTER TABLE tool_outputs
+                ADD COLUMN IF NOT EXISTS output JSONB
+            """)
+            cur.execute("""
+                ALTER TABLE tool_outputs
+                ADD COLUMN IF NOT EXISTS duration_ms INTEGER DEFAULT 0
+            """)
+            cur.execute("""
+                ALTER TABLE tool_outputs
+                ADD COLUMN IF NOT EXISTS timestamp TIMESTAMPTZ DEFAULT NOW()
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tool_outputs_dataset
+                ON tool_outputs(dataset_name, timestamp DESC)
+            """)
+
+            # Contract versioning table used by /contract* endpoints
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS contract_versions (
+                    id SERIAL PRIMARY KEY,
+                    dataset_name VARCHAR(255),
+                    contract_path TEXT,
+                    contract_content TEXT,
+                    contract_hash VARCHAR(128),
+                    created_by VARCHAR(255),
+                    change_type VARCHAR(64),
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                ALTER TABLE contract_versions
+                ADD COLUMN IF NOT EXISTS dataset_name VARCHAR(255)
+            """)
+            cur.execute("""
+                ALTER TABLE contract_versions
+                ADD COLUMN IF NOT EXISTS contract_path TEXT
+            """)
+            cur.execute("""
+                ALTER TABLE contract_versions
+                ADD COLUMN IF NOT EXISTS contract_content TEXT
+            """)
+            cur.execute("""
+                ALTER TABLE contract_versions
+                ADD COLUMN IF NOT EXISTS contract_hash VARCHAR(128)
+            """)
+            cur.execute("""
+                ALTER TABLE contract_versions
+                ADD COLUMN IF NOT EXISTS created_by VARCHAR(255)
+            """)
+            cur.execute("""
+                ALTER TABLE contract_versions
+                ADD COLUMN IF NOT EXISTS change_type VARCHAR(64)
+            """)
+            cur.execute("""
+                ALTER TABLE contract_versions
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_contract_versions_dataset
+                ON contract_versions(dataset_name, created_at DESC)
+            """)
+
+            # SLO History — per-run SLO compliance tracking
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS slo_history (
+                    id SERIAL PRIMARY KEY,
+                    run_id VARCHAR(64),
+                    timestamp TIMESTAMPTZ DEFAULT NOW(),
+                    dataset_name VARCHAR(255),
+                    slo_name VARCHAR(255),
+                    operator VARCHAR(16),
+                    target_value DOUBLE PRECISION,
+                    observed_value DOUBLE PRECISION,
+                    status VARCHAR(16),
+                    error_budget_burn DOUBLE PRECISION DEFAULT 0,
+                    metadata JSONB DEFAULT '{}'::jsonb
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_slo_history_dataset
+                ON slo_history(dataset_name, timestamp DESC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_slo_history_run
+                ON slo_history(run_id)
             """)
 
     print("✅ PostgreSQL tables initialized")

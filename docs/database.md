@@ -1,134 +1,158 @@
 # Database Schema Reference
 
-PostgreSQL 16 — connection managed by `src/utils/database.py`.
+PostgreSQL 16 schema initialized in `src/utils/database.py` (`init_tables()`).
 
-## Connection
+## Connection Pattern
 
 ```python
 from src.utils.database import get_connection
 
 with get_connection() as conn:
     with conn.cursor() as cur:
-        cur.execute("SELECT ... WHERE x = %s", (value,))
-        rows = cur.fetchall()
+        cur.execute("SELECT 1")
 ```
 
-- Pool: `psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=10)`
-- Auto-commit on success, auto-rollback on exception
-- Config via env: `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`
+- Driver: `psycopg2`
+- Pool: `ThreadedConnectionPool(minconn=2, maxconn=10)`
+- Auto-commit on success, rollback on exception
 
 ## Tables
 
 ### `run_history`
-One row per pipeline evaluation run.
+
+One row per evaluation run.
 
 | Column | Type | Notes |
-|--------|------|-------|
-| run_id | VARCHAR(64) PK | UUID identifier |
-| timestamp | TIMESTAMPTZ DEFAULT NOW() | When the run executed |
-| dataset_name | VARCHAR(255) | Dataset identifier |
-| status | VARCHAR(50) | PASSED / WARNING / BLOCKED |
-| quality_score | DOUBLE PRECISION | Overall quality % (0-100) |
-| anomaly_count | INTEGER DEFAULT 0 | Number of anomalies detected |
-| z_score_max | DOUBLE PRECISION DEFAULT 0 | Highest absolute z-score |
-| reason | TEXT | Human-readable verdict reason |
-| duration_ms | INTEGER | Wall-clock time of evaluation |
-| dimension_scores | JSONB | 6-dimensional quality scores |
-| full_verdict | JSONB | Complete verdict with all tool outputs |
+|---|---|---|
+| run_id | VARCHAR(64) PK | UUID run id |
+| timestamp | TIMESTAMPTZ | Run timestamp |
+| dataset_name | VARCHAR(255) | Dataset id |
+| status | VARCHAR(32) | PASSED / WARNING / BLOCKED |
+| quality_score | DOUBLE PRECISION | Overall quality |
+| anomaly_count | INTEGER | Number of detected anomalies |
+| z_score_max | DOUBLE PRECISION | Max absolute z-score from anomalies |
+| reason | TEXT | Verdict reason |
+| duration_ms | INTEGER | Run duration |
+| dimension_scores | JSONB | 6D score payload |
+| full_verdict | JSONB | Full pipeline output |
 
-**Indexes:** `idx_run_history_dataset` on (dataset_name, timestamp DESC)
-
-**Note:** The `full_verdict` column contains the complete pipeline output including:
-- Schema validation results
-- Data profiling details
-- Anomaly detection output
-- Impact analysis
-- LLM advice
-- Load status
+Indexes:
+- `idx_run_history_dataset(dataset_name, timestamp DESC)`
 
 ### `metric_history`
-Per-metric time-series data tied to runs.
+
+Metric time-series records linked to runs.
 
 | Column | Type | Notes |
-|--------|------|-------|
-| id | SERIAL PK | Auto-increment |
-| timestamp | TIMESTAMP DEFAULT NOW() | |
-| dataset_name | VARCHAR(255) | |
-| metric_name | VARCHAR(255) | e.g. `row_count`, `amount_null_rate` |
-| metric_value | DOUBLE PRECISION | The observed value |
-| day_of_week | INTEGER | 0=Mon ... 6=Sun (for seasonality) |
-| run_id | INTEGER | FK-like reference to run_history |
+|---|---|---|
+| run_id | VARCHAR(64) | Associated run id |
+| timestamp | TIMESTAMPTZ | Observation timestamp |
+| dataset_name | VARCHAR(255) | Dataset id |
+| metric_name | VARCHAR(255) | Metric key |
+| metric_value | DOUBLE PRECISION | Numeric value |
+| day_of_week | INTEGER | Seasonal baseline grouping |
+| metric_group | VARCHAR(64) | quality / volume / freshness / distribution / etc. |
+| column_name | VARCHAR(255) | Optional column-level association |
+| segment | VARCHAR(255) | Optional segment key (default `global`) |
+| tags | JSONB | Arbitrary metadata |
 
-**Indexes:** `idx_metric_history_lookup` on (dataset_name, metric_name)
+Indexes:
+- `idx_metrics(dataset_name, metric_name, day_of_week)`
+- `idx_metrics_run(run_id)`
+- `idx_metrics_grouped(dataset_name, metric_group, column_name, timestamp DESC)`
 
 ### `learned_thresholds`
-Adaptive baselines per metric. Updated by the anomaly detector as it learns.
+
+Cached anomaly baselines.
 
 | Column | Type | Notes |
-|--------|------|-------|
-| dataset_name | VARCHAR(255) | Composite PK with metric_name |
-| metric_name | VARCHAR(255) | |
-| baseline_mean | DOUBLE PRECISION | Rolling mean |
-| baseline_std | DOUBLE PRECISION | Rolling stddev |
-| baseline_type | VARCHAR(50) | `global`, `seasonal`, etc. |
-| last_updated | TIMESTAMP DEFAULT NOW() | |
-| sample_count | INTEGER DEFAULT 0 | Number of data points in baseline |
+|---|---|---|
+| dataset_name | VARCHAR(255) | Composite PK |
+| metric_name | VARCHAR(255) | Composite PK |
+| baseline_mean | DOUBLE PRECISION | Baseline mean |
+| baseline_std | DOUBLE PRECISION | Baseline std dev |
+| baseline_type | VARCHAR(32) | seasonal/global |
+| last_updated | TIMESTAMPTZ | Last refresh |
+| sample_count | INTEGER | Number of historical points |
 
-**Constraint:** `UNIQUE(dataset_name, metric_name)` — upserts via `ON CONFLICT DO UPDATE`
+Constraint:
+- `PRIMARY KEY(dataset_name, metric_name)`
 
 ### `dataset_registry`
-One row per known dataset. Updated after each scan.
+
+Dataset-level state and lifecycle metadata.
 
 | Column | Type | Notes |
-|--------|------|-------|
-| dataset_name | VARCHAR(255) PK | |
-| contract_path | TEXT | Path to YAML contract |
-| lifecycle | VARCHAR(50) DEFAULT 'active' | active / deprecated |
-| criticality | VARCHAR(50) DEFAULT 'UNKNOWN' | From lineage analysis |
-| last_status | VARCHAR(50) | Last evaluation result |
-| last_file_mtime | DOUBLE PRECISION | File modification time (for skip_unchanged) |
-| last_scanned | TIMESTAMP | |
-| scan_count | INTEGER DEFAULT 0 | Total scans for this dataset |
+|---|---|---|
+| dataset_name | VARCHAR(255) PK | Dataset id |
+| contract_path | TEXT | Current contract path |
+| lifecycle | VARCHAR(32) | active/unconfigured/deprecated/error |
+| criticality | VARCHAR(32) | Lineage-derived criticality |
+| last_scanned | TIMESTAMPTZ | Last evaluation time |
+| last_status | VARCHAR(32) | Last verdict status |
+| last_file_mtime | DOUBLE PRECISION | File mtime used for skip-unchanged |
+| scan_count | INTEGER | Number of scans |
+
+### `slo_history`
+
+Per-run SLO compliance checks.
+
+| Column | Type | Notes |
+|---|---|---|
+| id | SERIAL PK | Row id |
+| run_id | VARCHAR(64) | Run id |
+| timestamp | TIMESTAMPTZ | Check timestamp |
+| dataset_name | VARCHAR(255) | Dataset id |
+| slo_name | VARCHAR(255) | SLO name |
+| operator | VARCHAR(16) | `>=`, `<=` |
+| target_value | DOUBLE PRECISION | Target |
+| observed_value | DOUBLE PRECISION | Observed value |
+| status | VARCHAR(16) | PASS / FAIL |
+| error_budget_burn | DOUBLE PRECISION | Burn contribution for this check |
+| metadata | JSONB | Extra context |
+
+Indexes:
+- `idx_slo_history_dataset(dataset_name, timestamp DESC)`
+- `idx_slo_history_run(run_id)`
 
 ### `schema_audit_log`
-Governance trail for contract changes.
+
+Governance record of contract changes.
 
 | Column | Type | Notes |
-|--------|------|-------|
-| id | VARCHAR(36) PK | UUID |
-| dataset_name | VARCHAR(255) | |
-| filename | VARCHAR(255) | Version filename in config/history/ |
-| timestamp | TIMESTAMP DEFAULT NOW() | |
-| change_summary | TEXT | What changed and why |
+|---|---|---|
+| id | VARCHAR(64) PK | UUID |
+| dataset_name | VARCHAR(255) | Dataset id |
+| filename | TEXT | Version file |
+| timestamp | TIMESTAMPTZ | Change timestamp |
+| change_summary | TEXT | Change reason/summary |
 
 ### `remediation_history`
-Before/after YAML for AI-applied fixes.
+
+Audit trail for remediation actions.
 
 | Column | Type | Notes |
-|--------|------|-------|
-| id | SERIAL PK | |
-| dataset_name | VARCHAR(255) | |
-| timestamp | TIMESTAMP DEFAULT NOW() | |
-| error_context | TEXT | The error that triggered remediation |
-| original_yaml | TEXT | Contract before fix |
-| proposed_yaml | TEXT | Contract after fix |
-| backup_path | TEXT | Path to backup file |
+|---|---|---|
+| id | SERIAL PK | Row id |
+| dataset_name | VARCHAR(255) | Dataset id |
+| error_context | TEXT | Trigger context |
+| original_yaml | TEXT | Contract before |
+| proposed_yaml | TEXT | Contract after |
+| backup_path | TEXT | Backup/version path |
+| timestamp | TIMESTAMPTZ | Applied time |
 
-## Important Patterns
+### `tool_outputs`
+
+Per-tool telemetry for each run.
+
+### `contract_versions`
+
+Versioned contract snapshots and metadata.
+
+## SQL Safety Pattern
+
+Use `%s` placeholders with psycopg2, not string interpolation:
 
 ```python
-# ALWAYS use %s placeholders (psycopg2), never f-strings
-cur.execute("SELECT ... WHERE name = %s", (name,))
-
-# ALWAYS use context manager — auto-commits on success
-with get_connection() as conn:
-    with conn.cursor() as cur:
-        cur.execute(...)
-
-# Upsert pattern for learned_thresholds
-cur.execute("""
-    INSERT INTO learned_thresholds (dataset_name, metric_name, ...)
-    VALUES (%s, %s, ...)
-    ON CONFLICT (dataset_name, metric_name) DO UPDATE SET ...
-""", params)
+cur.execute("SELECT * FROM run_history WHERE dataset_name = %s", (dataset_name,))
 ```

@@ -12,9 +12,10 @@ Maps tool outputs to the 6 standard data quality dimensions:
 Returns weighted aggregate score + per-dimension breakdown for visualization.
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 import json
 
 
@@ -87,10 +88,76 @@ class DimensionScorer:
         self._validate_weights()
 
     def _validate_weights(self):
-        """Ensure weights sum to 1.0."""
+        """Ensure weights sum to 1.0, auto-normalize if needed."""
+        if set(self.weights.keys()) != set(self.DEFAULT_WEIGHTS.keys()):
+            raise ValueError(f"Weights must include all 6 dimensions: {list(self.DEFAULT_WEIGHTS.keys())}")
+
         total = sum(self.weights.values())
+
+        if total == 0:
+            raise ValueError("Weights must not all be zero")
+
+        # Auto-normalize if sum != 1.0 (allows user-friendly integers like 30, 25, 20)
         if abs(total - 1.0) > 0.01:
-            raise ValueError(f"Weights must sum to 1.0, got {total}")
+            print(f"⚙️  Normalizing weights (sum={total:.2f} → 1.0)")
+            self.weights = {k: v/total for k, v in self.weights.items()}
+
+    @staticmethod
+    def load_weights_from_contract(contract_path: Union[str, Path]) -> Optional[Dict[str, float]]:
+        """
+        Load quality_weights from YAML contract.
+
+        Args:
+            contract_path: Path to YAML contract file
+
+        Returns:
+            Dict mapping dimension name → weight, or None if not specified
+
+        Example YAML:
+            quality:
+              quality_weights:
+                completeness: 30
+                validity: 25
+                accuracy: 20
+        """
+        import yaml
+
+        path = Path(contract_path)
+        if not path.exists():
+            return None
+
+        try:
+            with open(path, 'r') as f:
+                contract = yaml.safe_load(f) or {}
+
+            weights_raw = contract.get("quality", {}).get("quality_weights")
+            if not weights_raw:
+                return None
+
+            # Map YAML keys (lowercase) to DimensionScorer keys (titlecase)
+            dimension_map = {
+                "validity": "Validity",
+                "completeness": "Completeness",
+                "uniqueness": "Uniqueness",
+                "accuracy": "Accuracy",
+                "timeliness": "Timeliness",
+                "consistency": "Consistency"
+            }
+
+            weights = {}
+            for yaml_key, dim_name in dimension_map.items():
+                if yaml_key in weights_raw:
+                    weights[dim_name] = float(weights_raw[yaml_key])
+
+            if len(weights) != 6:
+                print(f"⚠️  Incomplete weights in {path.name} (need all 6 dimensions), using defaults")
+                return None
+
+            return weights
+
+        except Exception as e:
+            print(f"⚠️  Failed to load weights from {path.name}: {e}")
+            return None
 
     def calculate_dimension_scores(
         self,
@@ -333,17 +400,38 @@ class DimensionScorer:
 
         TODO: Add SLA-based freshness monitoring
         """
-        total_checks = 1
-        passed_checks = 1
+        total_checks = 0
+        passed_checks = 0
         violations = []
 
-        # Placeholder - needs SLA implementation
-        # For now, assume PASS if no row count anomalies (implies recent data)
-        if anomaly_report.get("status") == "ANOMALY_DETECTED":
-            for anomaly in anomaly_report.get("anomalies", []):
-                if "row_count" in anomaly.get("metric_name", ""):
-                    passed_checks = 0
-                    violations.append("Potential staleness: Row count anomaly detected")
+        metrics = anomaly_report.get("metrics", {})
+        freshness = metrics.get("freshness_age_minutes")
+        if isinstance(freshness, dict):
+            total_checks += 1
+            freshness_value = freshness.get("value")
+            tags = freshness.get("tags", {}) if isinstance(freshness.get("tags"), dict) else {}
+            slo_target = tags.get("slo_target_minutes")
+
+            if slo_target is not None and freshness_value is not None:
+                if float(freshness_value) <= float(slo_target):
+                    passed_checks += 1
+                else:
+                    violations.append(
+                        f"Freshness breach: age {freshness_value:.2f} min > target {float(slo_target):.2f} min"
+                    )
+            else:
+                # Fallback heuristic: if freshness metric exists but no target, treat <= 360 min as pass.
+                if freshness_value is not None and float(freshness_value) <= 360.0:
+                    passed_checks += 1
+                else:
+                    violations.append(
+                        f"Freshness warning: age {float(freshness_value or 0):.2f} min without explicit SLA"
+                    )
+
+        if total_checks == 0:
+            # Backward-compatible fallback for runs without freshness metric.
+            total_checks = 1
+            passed_checks = 1
 
         score = (passed_checks / total_checks * 100) if total_checks > 0 else 100.0
         status = "PASS" if score >= 95 else ("WARN" if score >= 80 else "FAIL")
@@ -372,8 +460,9 @@ class DimensionScorer:
             for anomaly in anomaly_report.get("anomalies", []):
                 total_checks += 1
                 z_score = anomaly.get("z_score", 0)
+                metric_name = anomaly.get("metric_name") or anomaly.get("metric") or "unknown_metric"
                 violations.append(
-                    f"{anomaly['metric_name']}: Z-score {z_score:.2f} - {anomaly.get('reason', '')}"
+                    f"{metric_name}: Z-score {z_score:.2f} - {anomaly.get('reason', '')}"
                 )
         else:
             # Check all metrics for consistency
