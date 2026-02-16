@@ -29,6 +29,7 @@ It validates incoming datasets against contracts, detects anomalies, evaluates S
 
 - Frontend: React 19 + Vite + Tailwind + Recharts + Framer Motion
 - Backend API: FastAPI (`src/api.py`)
+- MCP server: FastMCP (`src/mcp/server.py`)
 - Orchestrator: `MonitorAgent` (`src/agents/monitor_agent.py`)
 - Event runner: file watcher (`src/runners/file_watcher.py`)
 - Persistence: PostgreSQL 16 (`run_history`, `metric_history`, `learned_thresholds`, `slo_history`, etc.)
@@ -98,6 +99,19 @@ npm run dev
 python3 -m src.runners.file_watcher
 ```
 
+### 7) Optional: Start MCP Server (Streamable HTTP)
+
+```bash
+python3 -m src.mcp.server --transport streamable-http --host 0.0.0.0 --port 8001 --path /mcp
+# MCP endpoint: http://localhost:8001/mcp
+```
+
+For local CLI/IDE integration:
+
+```bash
+python3 -m src.mcp.server --transport stdio
+```
+
 ## Notable API Endpoints
 
 - Health + datasets
@@ -133,6 +147,8 @@ src/
     file_actuator.py
   runners/
     file_watcher.py
+  mcp/
+    server.py
   tools/
     anomaly_detector.py
     data_profiler.py
@@ -154,6 +170,7 @@ docs/
   api.md
   architecture.md
   database.md
+  mcp.md
   file_watcher_guide.md
   plan.md
 ```

@@ -13,6 +13,7 @@ import uuid
 # Import our MonitorAgent
 from src.agents.monitor_agent import MonitorAgent
 from src.contracts.store import FileContractStore
+from src.services.reliability_service import ReliabilityService
 from src.utils.database import get_connection, init_tables
 
 load_dotenv()
@@ -52,23 +53,7 @@ agent = MonitorAgent(
     lineage_path="config/lineage.yaml",
     contract_store=contract_store,
 )
-
-
-def _matches_dataset_artifact(name: str, dataset_name: str) -> bool:
-    """
-    True when a file/table name belongs to the dataset or its timestamped variants.
-    """
-    normalized_name = name.lower()
-    normalized_dataset = dataset_name.lower()
-
-    if normalized_name == normalized_dataset:
-        return True
-
-    for sep in ("_", ".", "-"):
-        if normalized_name.startswith(f"{normalized_dataset}{sep}"):
-            return True
-
-    return False
+service = ReliabilityService(agent=agent, contract_store=contract_store)
 
 @app.get("/health")
 def health_check():
@@ -120,14 +105,7 @@ def get_pulse():
 def evaluate_dataset(dataset_name: str):
     """Trigger a health check for a specific dataset."""
     try:
-        # Find the data file
-        datasets = agent.discover_datasets()
-        meta = next((d for d in datasets if d["name"] == dataset_name), None)
-        if not meta or not meta.get("data_file"):
-            raise HTTPException(status_code=404, detail=f"Data file for {dataset_name} not found.")
-        
-        result = agent.evaluate_data_file(meta["data_file"], dataset_name)
-        return result
+        return service.evaluate_dataset(dataset_name)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -152,144 +130,8 @@ def delete_dataset(dataset_name: str):
     - PostgreSQL rows across dataset-scoped tables
     - DuckDB tables in local *.duckdb/*.db files (if present)
     """
-    dataset_name = dataset_name.strip()
-    if not dataset_name:
-        raise HTTPException(status_code=400, detail="dataset_name is required")
-
-    deleted_files = []
-    db_deleted_counts = {}
-    duckdb_summary = {}
-
-    def safe_unlink(path: Path):
-        if not path.exists() or not path.is_file():
-            return
-        path.unlink()
-        deleted_files.append(str(path))
-
     try:
-        # ---------------------------------------------------------
-        # 1) Filesystem cleanup
-        # ---------------------------------------------------------
-        try:
-            contract_file = contract_store.path_for(dataset_name)
-        except ValueError:
-            # Fallback for legacy dataset names containing unsupported characters.
-            contract_file = Path(f"config/expectations/{dataset_name}.yaml")
-
-        explicit_files = [
-            contract_file,
-            Path(f"config/proposals/{dataset_name}.yaml"),
-            Path(f"config/proposals/{dataset_name}.meta.json"),
-            Path(f"data/{dataset_name}.csv"),
-            Path(f"data/{dataset_name}.parquet"),
-            Path(f"data/{dataset_name}.json"),
-            Path(f"data/test/{dataset_name}.csv"),
-            Path(f"data/test/{dataset_name}.parquet"),
-            Path(f"data/test/{dataset_name}.json"),
-        ]
-        for path in explicit_files:
-            safe_unlink(path)
-
-        wildcard_candidates = []
-        wildcard_candidates.extend(contract_store.root_path.glob(f"{dataset_name}.backup_*.yaml"))
-        wildcard_candidates.extend(Path("config/history").glob(f"{dataset_name}_*.yaml"))
-
-        # Data + queue directories where files are named <dataset>_<suffix>.*
-        for directory in (
-            Path("data/landing"),
-            Path("data/pending_approval"),
-            Path("data/quarantine"),
-            Path("data/test"),
-            Path("data"),
-            Path("logs/runs"),
-        ):
-            if not directory.exists():
-                continue
-            for file_path in directory.glob("*"):
-                if file_path.is_file() and _matches_dataset_artifact(file_path.name, dataset_name):
-                    wildcard_candidates.append(file_path)
-
-        # Historical verdict logs are nested by date
-        history_root = Path("data/history")
-        if history_root.exists():
-            for file_path in history_root.rglob("*"):
-                if file_path.is_file() and _matches_dataset_artifact(file_path.name, dataset_name):
-                    wildcard_candidates.append(file_path)
-
-        # De-duplicate candidates before deleting
-        for path in {p.resolve() for p in wildcard_candidates}:
-            safe_unlink(path)
-
-        # ---------------------------------------------------------
-        # 2) PostgreSQL cleanup
-        # ---------------------------------------------------------
-        # Some tables may not exist in all environments. We guard with to_regclass.
-        dataset_tables = [
-            "run_history",
-            "metric_history",
-            "learned_thresholds",
-            "dataset_registry",
-            "schema_audit_log",
-            "remediation_history",
-            "tool_outputs",
-            "contract_versions",
-        ]
-
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                for table in dataset_tables:
-                    cur.execute("SELECT to_regclass(%s)", (f"public.{table}",))
-                    exists = cur.fetchone()[0] is not None
-                    if not exists:
-                        db_deleted_counts[table] = None
-                        continue
-
-                    cur.execute(f"DELETE FROM {table} WHERE dataset_name = %s", (dataset_name,))
-                    db_deleted_counts[table] = cur.rowcount
-
-        # ---------------------------------------------------------
-        # 3) DuckDB cleanup (if any local DuckDB files exist)
-        # ---------------------------------------------------------
-        duckdb_files = set()
-        for directory in (Path("."), Path("data"), Path("logs")):
-            if not directory.exists():
-                continue
-            duckdb_files.update(directory.glob("*.duckdb"))
-            duckdb_files.update(directory.glob("*.db"))
-
-        if duckdb_files:
-            try:
-                import duckdb
-
-                for db_path in sorted(duckdb_files):
-                    dropped_tables = []
-                    try:
-                        conn = duckdb.connect(str(db_path))
-                        table_rows = conn.execute("SHOW TABLES").fetchall()
-                        for row in table_rows:
-                            table_name = row[0]
-                            if _matches_dataset_artifact(table_name, dataset_name):
-                                conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
-                                dropped_tables.append(table_name)
-                        conn.close()
-                    except Exception as duck_err:
-                        duckdb_summary[str(db_path)] = {"error": str(duck_err)}
-                        continue
-
-                    if dropped_tables:
-                        duckdb_summary[str(db_path)] = {"dropped_tables": dropped_tables}
-            except Exception as import_err:
-                duckdb_summary["duckdb_import"] = {"error": str(import_err)}
-
-        return {
-            "status": "deleted",
-            "dataset_name": dataset_name,
-            "deleted_file_count": len(deleted_files),
-            "deleted_files": sorted(deleted_files),
-            "postgres_deleted_rows": db_deleted_counts,
-            "duckdb_cleanup": duckdb_summary,
-        }
-
+        return service.delete_dataset(dataset_name)
     except HTTPException:
         raise
     except Exception as e:
@@ -343,7 +185,7 @@ def get_recent_runs(limit: int = 50):
 def get_history(dataset_name: str, limit: int = 50):
     """Get run history for a dataset."""
     try:
-        return agent.get_run_history(dataset_name, limit)
+        return service.get_run_history(dataset_name, limit)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -351,38 +193,7 @@ def get_history(dataset_name: str, limit: int = 50):
 def get_full_verdict(run_id: str):
     """Get the full verdict with all tool outputs for a specific run."""
     try:
-        import json
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT run_id, timestamp, dataset_name, status, quality_score,
-                           anomaly_count, z_score_max, reason, duration_ms,
-                           dimension_scores, full_verdict
-                    FROM run_history
-                    WHERE run_id = %s
-                """, (run_id,))
-                row = cur.fetchone()
-
-                if not row:
-                    raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-
-                # Parse JSONB columns
-                dimension_scores = json.loads(row[9]) if row[9] else None
-                full_verdict = json.loads(row[10]) if row[10] else None
-
-                return {
-                    "run_id": row[0],
-                    "timestamp": row[1].isoformat() if row[1] else None,
-                    "dataset_name": row[2],
-                    "status": row[3],
-                    "quality_score": row[4],
-                    "anomaly_count": row[5],
-                    "z_score_max": row[6],
-                    "reason": row[7],
-                    "duration_ms": row[8],
-                    "dimension_scores": dimension_scores,
-                    "full_verdict": full_verdict
-                }
+        return service.get_run_verdict(run_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -392,28 +203,7 @@ def get_full_verdict(run_id: str):
 def chat_with_copilot(query: str):
     """Interact with the Agent reasoning engine."""
     try:
-        context_data = {
-            "discovered": agent.discover_datasets(),
-            "results": {}
-        }
-
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT dataset_name, last_status, criticality FROM dataset_registry")
-                rows = cur.fetchall()
-                for r in rows:
-                    name = r[0]
-                    history = agent.get_run_history(name, limit=1)
-                    latest = history[0] if history else {}
-                    context_data["results"][name] = {
-                        "status": r[1],
-                        "reason": latest.get("reason", "No recent run data"),
-                        "anomalies": [],
-                        "schema_evolution": {}
-                    }
-
-        response = agent.request_copilot_chat(query, context_data)
-        return {"response": response}
+        return service.chat_with_copilot(query)
     except Exception as e:
         print(f"Chat Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -793,35 +583,7 @@ def rollback_schema(request: GovernanceRollbackRequest):
 def propose_contract_endpoint(request: ContractProposeRequest):
     """Generate a proposed contract from data."""
     try:
-        # Determine data path
-        data_path = request.file_path
-        if not data_path:
-            # Try to infer from existing discovery
-            datasets = agent.discover_datasets()
-            meta = next((d for d in datasets if d["name"] == request.dataset_name), None)
-            if meta:
-                data_path = meta.get("data_file")
-        
-        # Fallback
-        if not data_path:
-             data_path = f"data/{request.dataset_name}.csv"
-             
-        if not Path(data_path).exists():
-             raise HTTPException(status_code=404, detail=f"Data file not found at {data_path}")
-
-        proposal = agent.propose_contract(request.dataset_name, data_path, include_metadata=True)
-        return {
-            "status": "success",
-            "proposed_yaml": proposal.get("yaml_content", ""),
-            "generation": {
-                "engine": proposal.get("engine"),
-                "success": proposal.get("success"),
-                "cli_available": proposal.get("cli_available"),
-                "errors": proposal.get("errors", []),
-                "warnings": proposal.get("warnings", []),
-                "generated_at": proposal.get("generated_at"),
-            },
-        }
+        return service.propose_contract(request.dataset_name, request.file_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -829,42 +591,7 @@ def propose_contract_endpoint(request: ContractProposeRequest):
 def get_pending_contracts():
     """Get all contracts pending human approval."""
     try:
-        proposals_dir = Path("config/proposals")
-        pending_dir = Path("data/pending_approval")
-
-        pending_contracts = []
-
-        # Find all proposal files
-        if proposals_dir.exists():
-            for meta_file in proposals_dir.glob("*.meta.json"):
-                dataset_name = meta_file.stem.replace('.meta', '')
-
-                # Read metadata
-                with open(meta_file, 'r') as f:
-                    metadata = json.load(f)
-
-                # Read proposed YAML
-                yaml_file = proposals_dir / f"{dataset_name}.yaml"
-                if yaml_file.exists():
-                    with open(yaml_file, 'r') as f:
-                        proposed_yaml = f.read()
-
-                    # Check if pending files exist
-                    pending_files = list(pending_dir.glob(f"{dataset_name}*"))
-
-                    pending_contracts.append({
-                        "dataset_name": dataset_name,
-                        "proposed_at": metadata.get("proposed_at"),
-                        "source_file": metadata.get("source_file"),
-                        "row_count": metadata.get("row_count"),
-                        "column_count": metadata.get("column_count"),
-                        "proposed_yaml": proposed_yaml,
-                        "pending_files": [f.name for f in pending_files],
-                        "status": metadata.get("status", "pending_approval")
-                    })
-
-        return pending_contracts
-
+        return service.get_pending_contracts()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1297,68 +1024,7 @@ def get_slo_history(dataset_name: str, limit: int = 100):
 def get_slo_summary(dataset_name: str, window: int = 200):
     """Get SLO attainment summary and error budget burn for a dataset."""
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    WITH recent AS (
-                        SELECT *
-                        FROM slo_history
-                        WHERE dataset_name = %s
-                        ORDER BY timestamp DESC
-                        LIMIT %s
-                    )
-                    SELECT
-                        slo_name,
-                        COUNT(*) AS total_checks,
-                        COUNT(*) FILTER (WHERE status = 'PASS') AS pass_checks,
-                        AVG(error_budget_burn) AS avg_error_budget_burn,
-                        MAX(timestamp) AS last_seen
-                    FROM recent
-                    GROUP BY slo_name
-                    ORDER BY slo_name
-                    """,
-                    (dataset_name, window),
-                )
-                grouped = cur.fetchall()
-
-                cur.execute(
-                    """
-                    WITH recent AS (
-                        SELECT status
-                        FROM slo_history
-                        WHERE dataset_name = %s
-                        ORDER BY timestamp DESC
-                        LIMIT %s
-                    )
-                    SELECT
-                        COUNT(*) AS total_checks,
-                        COUNT(*) FILTER (WHERE status = 'PASS') AS pass_checks
-                    FROM recent
-                    """,
-                    (dataset_name, window),
-                )
-                totals = cur.fetchone()
-                total_checks = int(totals[0] or 0)
-                pass_checks = int(totals[1] or 0)
-
-                return {
-                    "dataset_name": dataset_name,
-                    "window": window,
-                    "overall_pass_rate": round((pass_checks / total_checks) * 100, 2) if total_checks else None,
-                    "total_checks": total_checks,
-                    "checks": [
-                        {
-                            "slo_name": row[0],
-                            "total_checks": row[1],
-                            "pass_checks": row[2],
-                            "pass_rate": round((row[2] / row[1]) * 100, 2) if row[1] else None,
-                            "avg_error_budget_burn": float(row[3]) if row[3] is not None else None,
-                            "last_seen": row[4].isoformat() if row[4] else None,
-                        }
-                        for row in grouped
-                    ],
-                }
+        return service.get_slo_summary(dataset_name, window)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1376,77 +1042,7 @@ def approve_contract(request: ContractApprovalRequest):
     5. Clean up proposal files
     """
     try:
-        dataset_name = request.dataset_name
-        approved_yaml = request.approved_yaml
-
-        # Save approved contract
-        saved_contract = contract_store.write(dataset_name, approved_yaml)
-        contract_path = Path(saved_contract.location)
-
-        print(f"✅ Contract approved and saved: {contract_path}")
-
-        # Find pending files
-        pending_dir = Path("data/pending_approval")
-        pending_files = list(pending_dir.glob(f"{dataset_name}*"))
-
-        validation_results = []
-
-        if pending_files:
-            print(f"📋 Found {len(pending_files)} pending file(s) for validation")
-
-            # Validate each pending file
-            for file_path in pending_files:
-                if '.verdict.' in file_path.name:
-                    continue  # Skip verdict files
-
-                print(f"   Validating: {file_path.name}")
-
-                # Run validation
-                verdict = agent.evaluate_data_file(file_path=str(file_path), dataset_name=dataset_name)
-
-                # Write verdict
-                verdict_path = file_path.with_suffix(file_path.suffix + '.verdict.json')
-                with open(verdict_path, 'w') as f:
-                    json.dump(verdict, f, indent=2)
-
-                # Move file based on verdict
-                if verdict['status'] == 'BLOCKED':
-                    dest_dir = Path("data/quarantine")
-                    dest_dir.mkdir(exist_ok=True)
-                    dest = dest_dir / file_path.name
-                    shutil.move(str(file_path), str(dest))
-                    print(f"   🚫 BLOCKED → Moved to quarantine")
-                else:
-                    dest_dir = Path("data/landing")
-                    dest_dir.mkdir(exist_ok=True)
-                    dest = dest_dir / file_path.name
-                    shutil.move(str(file_path), str(dest))
-                    print(f"   ✅ PASSED → Moved to landing")
-
-                validation_results.append({
-                    "file": file_path.name,
-                    "status": verdict['status'],
-                    "quality_score": verdict.get('quality_score')
-                })
-
-        # Clean up proposal files
-        proposals_dir = Path("config/proposals")
-        proposal_yaml = proposals_dir / f"{dataset_name}.yaml"
-        proposal_meta = proposals_dir / f"{dataset_name}.meta.json"
-
-        if proposal_yaml.exists():
-            proposal_yaml.unlink()
-        if proposal_meta.exists():
-            proposal_meta.unlink()
-
-        return {
-            "status": "approved",
-            "dataset_name": dataset_name,
-            "contract_path": str(contract_path),
-            "validated_files": validation_results,
-            "message": f"Contract approved. Validated {len(validation_results)} pending file(s)."
-        }
-
+        return service.approve_contract(request.dataset_name, request.approved_yaml)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1458,36 +1054,7 @@ def reject_contract_proposal(dataset_name: str):
     Moves pending files to quarantine and removes proposal.
     """
     try:
-        # Move pending files to quarantine
-        pending_dir = Path("data/pending_approval")
-        quarantine_dir = Path("data/quarantine")
-        quarantine_dir.mkdir(exist_ok=True)
-
-        pending_files = list(pending_dir.glob(f"{dataset_name}*"))
-        moved_files = []
-
-        for file_path in pending_files:
-            dest = quarantine_dir / file_path.name
-            shutil.move(str(file_path), str(dest))
-            moved_files.append(file_path.name)
-
-        # Remove proposal files
-        proposals_dir = Path("config/proposals")
-        proposal_yaml = proposals_dir / f"{dataset_name}.yaml"
-        proposal_meta = proposals_dir / f"{dataset_name}.meta.json"
-
-        if proposal_yaml.exists():
-            proposal_yaml.unlink()
-        if proposal_meta.exists():
-            proposal_meta.unlink()
-
-        return {
-            "status": "rejected",
-            "dataset_name": dataset_name,
-            "quarantined_files": moved_files,
-            "message": f"Proposal rejected. {len(moved_files)} file(s) moved to quarantine."
-        }
-
+        return service.reject_contract_proposal(dataset_name)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
