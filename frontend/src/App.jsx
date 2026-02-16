@@ -325,6 +325,7 @@ const RunTimeline = ({ history }) => {
 const HistoryTab = ({ datasets, history = [] }) => {
   const [selectedRun, setSelectedRun] = useState(null);
   const [jsonModalOpen, setJsonModalOpen] = useState(false);
+  const [filter, setFilter] = useState("ALL");
 
   // If no history, show empty state
   if (!history || history.length === 0) {
@@ -339,9 +340,40 @@ const HistoryTab = ({ datasets, history = [] }) => {
     );
   }
 
+  // Filter history based on status
+  const filteredHistory = filter === "ALL"
+    ? history
+    : filter === "INCIDENTS"
+    ? history.filter(h => h.status === "BLOCKED" || h.status === "WARNING")
+    : history.filter(h => h.status === filter);
+
+  const incidentCount = history.filter(h => h.status === "BLOCKED" || h.status === "WARNING").length;
+  const passedCount = history.filter(h => h.status === "PASSED").length;
+
   return (
     <div className="flex flex-col h-full">
       <RunTimeline history={history} />
+
+      {/* Filter Chips */}
+      <div className="flex gap-2 mb-4">
+        {[
+          { key: "ALL", label: "All Runs", count: history.length },
+          { key: "INCIDENTS", label: "Incidents Only", count: incidentCount },
+          { key: "PASSED", label: "Passed", count: passedCount },
+        ].map((f) => (
+          <button
+            key={f.key}
+            onClick={() => setFilter(f.key)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${filter === f.key
+              ? "bg-primary text-primary-foreground"
+              : "bg-muted text-muted-foreground hover:bg-muted/80"
+            }`}
+          >
+            {f.label} ({f.count})
+          </button>
+        ))}
+      </div>
+
       <div className="flex gap-8 flex-1 overflow-hidden">
         <JsonViewerModal
           isOpen={jsonModalOpen}
@@ -351,7 +383,7 @@ const HistoryTab = ({ datasets, history = [] }) => {
         />
 
         <div className="w-1/3 border-r pr-6 space-y-3 overflow-y-auto custom-scrollbar">
-          {history.map((run, idx) => (
+          {filteredHistory.map((run, idx) => (
             <div
               key={idx}
               onClick={() => setSelectedRun(run)}
@@ -362,10 +394,13 @@ const HistoryTab = ({ datasets, history = [] }) => {
             >
               <div className="flex justify-between items-center mb-2">
                 <span
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${run.status === "PASSED"
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                    run.status === "PASSED"
                     ? "bg-emerald-100 text-emerald-700"
+                    : run.status === "WARNING"
+                    ? "bg-amber-100 text-amber-700"
                     : "bg-rose-100 text-rose-700"
-                    }`}
+                  }`}
                 >
                   {run.status}
                 </span>
@@ -2121,7 +2156,6 @@ const App = () => {
           {[
             { id: "health", icon: Activity, label: "Schema Health" },
             { id: "datasets", icon: Database, label: "Datasets" },
-            { id: "incidents", icon: AlertCircle, label: "Incidents" },
             { id: "history", icon: History, label: "Run History" },
             { id: "lineage", icon: Link, label: "Data Lineage" },
             { id: "connections", icon: Network, label: "Connections" },
@@ -2235,8 +2269,7 @@ const App = () => {
             <h2 className="text-xl font-black text-foreground tracking-tight">
               {activeTab === "health" && "Schema Health Pulse"}
               {activeTab === "datasets" && "Datasets Overview"}
-              {activeTab === "incidents" && "Incident Feed"}
-              {activeTab === "history" && "System Run History"}
+              {activeTab === "history" && "Run History & Incidents"}
               {activeTab === "lineage" && "Data Lineage Graph"}
               {activeTab === "connections" && "Source Integrations"}
             </h2>
@@ -2589,11 +2622,6 @@ const App = () => {
               previewDataset={previewDataset}
               setPreviewDataset={setPreviewDataset}
             />
-          )}
-          {activeTab === "incidents" && (
-            <div className="bg-card border border-border rounded-3xl p-6 min-h-[500px]">
-              <IncidentFeed />
-            </div>
           )}
           {activeTab === "history" && (
             <HistoryTab datasets={allDatasets} history={historyData} />
