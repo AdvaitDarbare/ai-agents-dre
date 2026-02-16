@@ -17,6 +17,9 @@ psycopg2-binary>=2.9.9
 agno>=1.0.0
 openai>=1.0.0
 mcp>=1.0.0
+langgraph>=0.5.4,<0.6.0
+langgraph-checkpoint>=2.1.0,<3.0.0
+langgraph-checkpoint-postgres>=2.0.0,<3.0.0
 
 # File event runner
 watchdog>=4.0.0

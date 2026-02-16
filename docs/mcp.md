@@ -18,6 +18,8 @@ Implementation:
 - `chat_with_copilot(query)`
 - `delete_dataset(dataset_name, confirm=false)`
 
+`approve_contract`/`delete /contracts/pending` resume a paused LangGraph HITL thread when one exists for the dataset.
+
 `delete_dataset` requires `confirm=true`.
 
 ## Run (Streamable HTTP)

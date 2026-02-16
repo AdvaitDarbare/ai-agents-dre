@@ -15,6 +15,7 @@ from src.agents.monitor_agent import MonitorAgent
 from src.contracts.store import FileContractStore
 from src.services.reliability_service import ReliabilityService
 from src.utils.database import get_connection, init_tables
+from src.workflows.hitl_contract_workflow import HITLContractWorkflow
 
 load_dotenv()
 
@@ -53,7 +54,12 @@ agent = MonitorAgent(
     lineage_path="config/lineage.yaml",
     contract_store=contract_store,
 )
-service = ReliabilityService(agent=agent, contract_store=contract_store)
+hitl_workflow = HITLContractWorkflow(agent=agent, contract_store=contract_store)
+service = ReliabilityService(
+    agent=agent,
+    contract_store=contract_store,
+    hitl_workflow=hitl_workflow,
+)
 
 @app.get("/health")
 def health_check():

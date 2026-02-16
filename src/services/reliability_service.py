@@ -18,9 +18,15 @@ class ReliabilityService:
     Service layer for core reliability operations used by API routes and MCP tools.
     """
 
-    def __init__(self, agent: MonitorAgent, contract_store: FileContractStore):
+    def __init__(
+        self,
+        agent: MonitorAgent,
+        contract_store: FileContractStore,
+        hitl_workflow: Optional[Any] = None,
+    ):
         self.agent = agent
         self.contract_store = contract_store
+        self.hitl_workflow = hitl_workflow
 
     @staticmethod
     def _matches_dataset_artifact(name: str, dataset_name: str) -> bool:
@@ -372,7 +378,7 @@ class ReliabilityService:
                     ],
                 }
 
-    def approve_contract(self, dataset_name: str, approved_yaml: str) -> Dict[str, Any]:
+    def _approve_contract_direct(self, dataset_name: str, approved_yaml: str) -> Dict[str, Any]:
         """
         Approve a contract and trigger validation of pending files.
         """
@@ -439,7 +445,19 @@ class ReliabilityService:
             "message": f"Contract approved. Validated {len(validation_results)} pending file(s).",
         }
 
-    def reject_contract_proposal(self, dataset_name: str) -> Dict[str, Any]:
+    def approve_contract(self, dataset_name: str, approved_yaml: str) -> Dict[str, Any]:
+        if self.hitl_workflow is not None:
+            resumed = self.hitl_workflow.resume(
+                dataset_name=dataset_name,
+                decision="approve",
+                approved_yaml=approved_yaml,
+            )
+            if resumed.get("handled"):
+                return resumed.get("result", {})
+
+        return self._approve_contract_direct(dataset_name=dataset_name, approved_yaml=approved_yaml)
+
+    def _reject_contract_proposal_direct(self, dataset_name: str) -> Dict[str, Any]:
         """
         Reject a contract proposal.
         Moves pending files to quarantine and removes proposal.
@@ -471,3 +489,14 @@ class ReliabilityService:
             "quarantined_files": moved_files,
             "message": f"Proposal rejected. {len(moved_files)} file(s) moved to quarantine.",
         }
+
+    def reject_contract_proposal(self, dataset_name: str) -> Dict[str, Any]:
+        if self.hitl_workflow is not None:
+            resumed = self.hitl_workflow.resume(
+                dataset_name=dataset_name,
+                decision="reject",
+            )
+            if resumed.get("handled"):
+                return resumed.get("result", {})
+
+        return self._reject_contract_proposal_direct(dataset_name=dataset_name)

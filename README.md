@@ -32,6 +32,7 @@ It validates incoming datasets against contracts, detects anomalies, evaluates S
 - MCP server: FastMCP (`src/mcp/server.py`)
 - Orchestrator: `MonitorAgent` (`src/agents/monitor_agent.py`)
 - Event runner: file watcher (`src/runners/file_watcher.py`)
+- HITL workflow runtime: LangGraph (`src/workflows/hitl_contract_workflow.py`)
 - Persistence: PostgreSQL 16 (`run_history`, `metric_history`, `learned_thresholds`, `slo_history`, etc.)
 - Profiling/validation engine: DuckDB in-memory + pandas
 - LLM runtime: Agno with OpenAI model adapter
@@ -44,6 +45,7 @@ It validates incoming datasets against contracts, detects anomalies, evaluates S
 4. If no contract: move to `data/pending_approval`, generate proposal in `config/proposals`
 5. On approval: save contract and validate pending files automatically
 6. Persist runs, metrics, baselines, SLO checks, and verdict logs
+7. Contract-missing path is durable via LangGraph interrupt/resume + PostgreSQL checkpointer
 
 ## Quick Start
 
@@ -147,6 +149,8 @@ src/
     file_actuator.py
   runners/
     file_watcher.py
+  workflows/
+    hitl_contract_workflow.py
   mcp/
     server.py
   tools/

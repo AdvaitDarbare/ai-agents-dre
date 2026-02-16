@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from src.agents.monitor_agent import MonitorAgent
 from src.contracts.store import FileContractStore
 from src.services.reliability_service import ReliabilityService
+from src.workflows.hitl_contract_workflow import HITLContractWorkflow
 
 
 def _build_service() -> ReliabilityService:
@@ -20,7 +21,12 @@ def _build_service() -> ReliabilityService:
         lineage_path="config/lineage.yaml",
         contract_store=contract_store,
     )
-    return ReliabilityService(agent=agent, contract_store=contract_store)
+    hitl_workflow = HITLContractWorkflow(agent=agent, contract_store=contract_store)
+    return ReliabilityService(
+        agent=agent,
+        contract_store=contract_store,
+        hitl_workflow=hitl_workflow,
+    )
 
 
 def _normalize_error(exc: Exception) -> RuntimeError:
