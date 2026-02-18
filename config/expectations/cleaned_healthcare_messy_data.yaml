@@ -1,0 +1,62 @@
+kind: DataContract
+apiVersion: v3.1.0
+id: my-data-contract
+info:
+  title: My Data Contract
+  version: 1.0.0
+  description: Generated model of data/landing/cleaned_healthcare_messy_data.csv
+  owner: Unknown
+  domain: Unknown
+table_name: cleaned_healthcare_messy_data
+description: Generated model of data/landing/cleaned_healthcare_messy_data.csv
+quality:
+  min_rows: 1
+  anomaly_thresholds:
+    z_score_warning: 2.5
+    z_score_critical: 3.0
+    quality_score_warn: 80
+    quality_score_block: 50
+  slos:
+    min_quality_score: 80
+    max_anomaly_count: 0
+columns:
+- name: Patient Name
+  data_type: varchar
+  nullable: true
+  description: Imported from cleaned_healthcare_messy_data.csv
+- name: Age
+  data_type: integer
+  nullable: true
+  description: Imported from cleaned_healthcare_messy_data.csv
+- name: Gender
+  data_type: varchar
+  nullable: true
+  description: Imported from cleaned_healthcare_messy_data.csv
+- name: Condition
+  data_type: varchar
+  nullable: true
+  description: Imported from cleaned_healthcare_messy_data.csv
+- name: Medication
+  data_type: varchar
+  nullable: true
+  description: Imported from cleaned_healthcare_messy_data.csv
+- name: Visit Date
+  data_type: date
+  nullable: true
+  description: Imported from cleaned_healthcare_messy_data.csv
+- name: Blood Pressure
+  data_type: varchar
+  nullable: true
+  description: Imported from cleaned_healthcare_messy_data.csv
+- name: Cholesterol
+  data_type: integer
+  nullable: true
+  description: Imported from cleaned_healthcare_messy_data.csv
+- name: Email
+  data_type: varchar
+  nullable: true
+  description: Imported from cleaned_healthcare_messy_data.csv
+- name: Phone Number
+  data_type: varchar
+  nullable: true
+  description: Imported from cleaned_healthcare_messy_data.csv

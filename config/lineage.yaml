@@ -1,5 +1,4 @@
 datasets:
-
   logs:
     consumers:
     - criticality: LOW
@@ -7,12 +6,49 @@ datasets:
       owner: Engineering
       type: app
 
-  # NYC Taxi Data for user testing
   nyc_taxi:
-    owner: "data-engineering"
+    owner: data-engineering
     upstream: []
     consumers:
-      - name: Traffic_Analysis_Dashboard
-        type: dashboard
-        owner: Data Science
-        criticality: HIGH
+    - name: Traffic_Analysis_Dashboard
+      type: dashboard
+      owner: Data Science
+      criticality: HIGH
+
+  demo_signup_funnel:
+    owner: growth-analytics
+    upstream:
+    - crm_events_raw
+    consumers:
+    - name: Growth_Funnel_Dashboard
+      type: dashboard
+      owner: Growth Team
+      criticality: HIGH
+    - name: Acquisition_Metrics_Model
+      type: ml_model
+      owner: Data Science
+      criticality: MEDIUM
+
+  demo_support_tickets:
+    owner: support-ops
+    upstream:
+    - demo_signup_funnel
+    - support_platform_events
+    consumers:
+    - name: CX_Operations_Dashboard
+      type: dashboard
+      owner: Support Leadership
+      criticality: MEDIUM
+    - name: Escalation_Risk_Model
+      type: ml_model
+      owner: Applied AI
+      criticality: MEDIUM
+
+  demo_sensor_telemetry:
+    owner: platform-operations
+    upstream: []
+    consumers:
+    - name: Device_Health_Watch
+      type: dashboard
+      owner: SRE
+      criticality: HIGH

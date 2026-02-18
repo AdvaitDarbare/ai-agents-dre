@@ -15,18 +15,17 @@ A structured JSON verdict + Human-readable summary.
 """
 
 import os
-import pandas as pd
 import json
 import time
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 # Tool Imports
+from src.connectors import ConnectorDataset, build_connectors
 from src.contracts.store import ContractStore, FileContractStore
 from src.tools.contract_diff import merge_contracts
-from src.tools.schema_validator import validate_schema, ValidationResult, ValidationStatus
 from src.tools.anomaly_detector import AnomalyDetector
 from src.tools.impact_analyzer import ImpactAnalyzer
 from src.tools.doris_loader import DorisLoader
@@ -35,7 +34,8 @@ from src.utils.tool_logger import ToolLogger
 from src.tools.data_profiler import DataProfiler
 from src.tools.system_health import SystemHealthCheck
 from src.tools.alert_router import AlertRouter
-from src.tools.dimension_scorer import DimensionScorer
+from src.pipeline.context import PipelineContext
+from src.pipeline.stages import action_stage, anomaly_stage, ingest_stage, profile_stage, schema_stage
 
 # Agno Agent Imports
 from agno.agent import Agent
@@ -70,6 +70,8 @@ class MonitorAgent:
         self.system_health = SystemHealthCheck()
         self.alert_router = AlertRouter()
         self.dimension_scorer = None  # Will be created per-dataset with custom weights in evaluate_data_file()
+        self.connectors = build_connectors()
+        self.connectors_by_name = {str(getattr(c, "name", "")).strip(): c for c in self.connectors}
         
         # Initialize the Reasoning Engine (LLM)
         # Using Agno's Agent with OpenAI
@@ -88,13 +90,14 @@ class MonitorAgent:
         )
 
     def propose_contract(self, dataset_name: str, data_path: str, include_metadata: bool = False) -> Any:
-        # Orchestrate the contract generation using datacontract-cli.
+        # Orchestrate contract generation via datacontract-cli (preferred) with deterministic fallback.
         # If an existing contract exists, we merge the new schema into it to preserve metadata.
-        print(f"🕵️ Profiling data for {dataset_name} using datacontract-cli...")
+        print(f"🕵️ Profiling data for {dataset_name} and generating contract...")
         
         # 1. Generate new schema from data (Observation)
         generation = self.remediator.generate_initial_contract_with_report(data_path, dataset_name)
         observed_yaml = generation.yaml_content
+        print(f"   Generator engine: {generation.engine}")
 
         # 2. Check for existing contract
         existing_contract = self.contract_store.read(dataset_name)
@@ -217,12 +220,44 @@ class MonitorAgent:
         targets = self._extract_slo_targets(contract_data)
         checks: List[Dict[str, Any]] = []
 
+        def _compute_error_budget_burn(operator: str, target: float, observed: float) -> Dict[str, float]:
+            delta = 0.0
+            if operator == ">=":
+                delta = max(0.0, target - observed)
+            elif operator == "<=":
+                delta = max(0.0, observed - target)
+            denominator = abs(target) if abs(target) > 1e-9 else max(abs(observed), 1.0)
+            ratio = (delta / denominator) if denominator > 0 else 0.0
+            return {
+                "delta": float(delta),
+                "ratio": float(ratio),
+                "burn": float(min(1.0, max(0.0, ratio))),
+            }
+
         def add_check(name: str, operator: str, target: float, observed: float, metadata: Dict[str, Any]):
             passed = False
             if operator == ">=":
                 passed = observed >= target
             elif operator == "<=":
                 passed = observed <= target
+            burn_stats = _compute_error_budget_burn(operator, float(target), float(observed))
+            severity = "NONE"
+            if not passed:
+                if burn_stats["burn"] >= 0.5:
+                    severity = "CRITICAL"
+                elif burn_stats["burn"] >= 0.2:
+                    severity = "HIGH"
+                else:
+                    severity = "MEDIUM"
+
+            check_metadata = dict(metadata or {})
+            check_metadata.update(
+                {
+                    "severity": severity,
+                    "breach_delta": burn_stats["delta"],
+                    "breach_ratio": burn_stats["ratio"],
+                }
+            )
             checks.append(
                 {
                     "slo_name": name,
@@ -230,8 +265,8 @@ class MonitorAgent:
                     "target": float(target),
                     "observed": float(observed),
                     "status": "PASS" if passed else "FAIL",
-                    "error_budget_burn": 0.0 if passed else 1.0,
-                    "metadata": metadata,
+                    "error_budget_burn": burn_stats["burn"],
+                    "metadata": check_metadata,
                 }
             )
 
@@ -283,16 +318,24 @@ class MonitorAgent:
                 )
 
         pass_count = sum(1 for c in checks if c["status"] == "PASS")
+        fail_count = sum(1 for c in checks if c["status"] != "PASS")
         total = len(checks)
+        burn_total = float(sum(float(c.get("error_budget_burn", 0.0) or 0.0) for c in checks))
+        burn_avg = (burn_total / total) if total else 0.0
+        failing_slos = [str(c.get("slo_name") or "") for c in checks if c.get("status") != "PASS"]
         return {
             "dataset_name": dataset_name,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "overall_status": "PASS" if pass_count == total else "FAIL",
             "pass_rate": round((pass_count / total) * 100, 2) if total else 100.0,
+            "fail_count": fail_count,
+            "error_budget_burn_total": round(burn_total, 4),
+            "error_budget_burn_avg": round(burn_avg, 4),
+            "failing_slos": failing_slos,
             "checks": checks,
         }
 
-    def evaluate_data_file(self, file_path: str, dataset_name: str) -> Dict[str, Any]:
+    def evaluate_data_file(self, file_path: str, dataset_name: str, force_load: bool = False) -> Dict[str, Any]:
         """
         Execute the Sequential Logic Pipeline to evaluate a data file.
 
@@ -305,12 +348,10 @@ class MonitorAgent:
         """
         import time as _time
         import uuid
-        _start_time = _time.time()
+        start_time = _time.time()
 
-        # Generate run_id at the start for tool logging
         run_id = str(uuid.uuid4())
         tool_logger = ToolLogger(run_id=run_id, dataset_name=dataset_name)
-
         verdict = {
             "status": "PASSED",
             "reason": "All checks passed.",
@@ -319,374 +360,35 @@ class MonitorAgent:
             "actions": ["Proceed to Load"],
             "dataset": dataset_name,
             "timestamp": datetime.now().isoformat(),
-            "run_id": run_id
+            "run_id": run_id,
         }
-        
-        # 0. Load Data
-        file_ext = Path(file_path).suffix.lower()
-        if file_ext == ".parquet":
-            source_type = "parquet"
-        elif file_ext == ".json":
-            source_type = "json"
-        else:
-            source_type = "csv"
-
-        try:
-            if source_type == "parquet":
-                df = pd.read_parquet(file_path)
-            elif source_type == "json":
-                df = pd.read_json(file_path)
-            else:
-                df = pd.read_csv(file_path)
-        except FileNotFoundError:
-            return {
-                "status": "BLOCKED", 
-                "reason": f"File not found: {file_path}",
-                "actions": ["Abort"]
-            }
-        except Exception as e:
-            return {
-                "status": "BLOCKED",
-                "reason": f"Failed to load file: {str(e)}",
-                "actions": ["Abort"]
-            }
-
-        # ---------------------------------------------------------
-        # Stage A: Schema Validation (The "Hard" Gate)
-        # ---------------------------------------------------------
-        print(f"\n🔍 [Stage A] Validating Schema for '{dataset_name}'...")
-        contract_file = self.contract_store.path_for(dataset_name)
-
-        # We use the functional wrapper from schema_validator
-        # but we need to pass the file_path, not the dataframe directly to the existing tool
-        # The existing tool reads the file itself.
-        # Ideally, we'd refactor to accept DF, but for now let's pass file path.
-        _schema_start = time.time()
-        schema_result = validate_schema(contract_file, file_path, source_type=source_type)
-        _schema_duration = int((time.time() - _schema_start) * 1000)
-        schema_diff = schema_result.get_schema_diff()
-
-        # Log schema validation
-        tool_logger.log_simple(
-            tool_name="schema_validator",
-            status="SUCCESS" if schema_result.is_valid else "FAILED",
-            output=schema_result.to_dict(),
-            duration_ms=_schema_duration
-        )
-        
-        # Store diff in verdict
-        verdict["schema_evolution"] = schema_diff
-        verdict["schema_result"] = schema_result.to_dict() if hasattr(schema_result, "to_dict") else {}
-        
-        # Logic: Breaking vs Non-Breaking
-        if schema_diff["missing_columns"] or schema_diff["type_mismatches"]:
-            error_parts = []
-            if schema_diff["missing_columns"]:
-                error_parts.append(f"Missing columns: {', '.join(schema_diff['missing_columns'])}")
-            if schema_diff["type_mismatches"]:
-                mismatches = [f"{m['column']} (expected {m['expected']}, got {m['actual']})" for m in schema_diff["type_mismatches"]]
-                error_parts.append(f"Type mismatches: {', '.join(mismatches)}")
-            
-            verdict["status"] = "BLOCKED"
-            verdict["reason"] = f"Schema Violation: {'; '.join(error_parts)}"
-            verdict["actions"] = ["Quarantine", "Fix Schema/Data"]
-            verdict["load_status"] = "SKIPPED (Blocked by Agent)"
-
-            # Even on schema-blocking runs, compute and persist a minimal 6D snapshot
-            # so /quality-dimensions can explain *why* the run failed.
-            try:
-                custom_weights = DimensionScorer.load_weights_from_contract(contract_file)
-                dimension_scorer = DimensionScorer(weights=custom_weights)
-                dimension_report = dimension_scorer.calculate_dimension_scores(
-                    dataset_name=dataset_name,
-                    schema_result=verdict["schema_result"],
-                    profile_report={},
-                    anomaly_report={"status": "PASS", "anomalies": [], "metrics": {}},
-                )
-                verdict["quality_dimensions"] = dimension_report.to_dict()
-            except Exception as dim_err:
-                print(f"⚠️ Failed to compute blocked-run dimension scores: {dim_err}")
-
-            self._record_run(dataset_name, verdict, file_path, _start_time)
-            return self._enrich_with_llm(verdict)
-            
-        if schema_diff["new_columns"]:
-            print(f"⚠️  Schema Evolution Detected: {len(schema_diff['new_columns'])} new columns.")
-            # We don't block, but we note it.
-
-        # Load configurable thresholds from the contract
-        import yaml as _yaml
-        _contract_data = {}
-        try:
-            contract_doc = self.contract_store.read(dataset_name)
-            if contract_doc:
-                _contract_data = _yaml.safe_load(contract_doc.content) or {}
-        except Exception:
-            pass
-        _thresholds = _contract_data.get("quality", {}).get("anomaly_thresholds", {})
-        z_warn = _thresholds.get("z_score_warning", 2.5)
-        z_critical = _thresholds.get("z_score_critical", 3.0)
-        qs_warn = _thresholds.get("quality_score_warn", 80)
-        qs_block = _thresholds.get("quality_score_block", 50)
-        slo_targets = self._extract_slo_targets(_contract_data)
-
-        # ---------------------------------------------------------
-        # Stage A2: Data Profiling (Value-Level Quality)
-        # ---------------------------------------------------------
-        print(f"\n🔬 [Stage A2] Profiling Data Values for '{dataset_name}'...")
-        _profile_start = time.time()
-        profile_report = self.profiler.profile(df, contract_file, dataset_name)
-        _profile_duration = int((time.time() - _profile_start) * 1000)
-
-        verdict["profile"] = {
-            "overall_quality_score": profile_report.overall_quality_score,
-            "constraint_violations": profile_report.constraint_violations,
-            "custom_check_results": profile_report.custom_check_results,
-            "column_scores": {k: v.quality_score for k, v in profile_report.column_profiles.items()},
-            "null_rates": {k: v.null_rate for k, v in profile_report.column_profiles.items()},
-            "violations_detail": {k: v.violations for k, v in profile_report.column_profiles.items() if v.violations},
-            "column_profiles": {k: v.to_dict() for k, v in profile_report.column_profiles.items()}
-        }
-
-        # Log data profiling
-        tool_logger.log_simple(
-            tool_name="data_profiler",
-            status="SUCCESS",
-            output={
-                "overall_quality_score": profile_report.overall_quality_score,
-                "total_violations": len(profile_report.constraint_violations),
-                "column_count": len(profile_report.column_profiles)
-            },
-            duration_ms=_profile_duration
+        ctx = PipelineContext(
+            dataset_name=dataset_name,
+            file_path=file_path,
+            start_time=start_time,
+            run_id=run_id,
+            tool_logger=tool_logger,
+            verdict=verdict,
+            force_load=force_load,
         )
 
-        # ---------------------------------------------------------
-        # Stage A3: Calculate 6-Dimensional Quality Scores (EARLY)
-        # ---------------------------------------------------------
-        print(f"\n📊 [Stage A3] Calculating 6-Dimensional Quality Scores...")
+        ingest_failure = ingest_stage.run(ctx)
+        if ingest_failure is not None:
+            return ingest_failure
 
-        # Load custom weights from YAML contract
-        _weights_start = time.time()
-        custom_weights = DimensionScorer.load_weights_from_contract(contract_file)
+        if not schema_stage.run(self, ctx):
+            self._record_run(dataset_name, ctx.verdict, file_path, start_time)
+            return self._enrich_with_llm(ctx.verdict)
 
-        # Initialize scorer with custom or default weights
-        dimension_scorer = DimensionScorer(weights=custom_weights)
-        _weights_duration = int((time.time() - _weights_start) * 1000)
+        if not profile_stage.run(self, ctx):
+            self._record_run(dataset_name, ctx.verdict, file_path, start_time)
+            return self._enrich_with_llm(ctx.verdict)
 
-        print(f"   Using {'custom' if custom_weights else 'default'} weights: " +
-              f"Completeness {dimension_scorer.weights['Completeness']*100:.0f}%, " +
-              f"Validity {dimension_scorer.weights['Validity']*100:.0f}%, " +
-              f"Accuracy {dimension_scorer.weights['Accuracy']*100:.0f}%")
+        anomaly_stage.run(self, ctx)
+        action_stage.run(self, ctx)
 
-        # Calculate dimension scores
-        _dimension_start = time.time()
-        try:
-            dimension_report = dimension_scorer.calculate_dimension_scores(
-                dataset_name=dataset_name,
-                schema_result=schema_result.to_dict() if hasattr(schema_result, 'to_dict') else {},
-                profile_report=verdict.get("profile", {}),
-                anomaly_report={
-                    "status": "PASS",  # Anomaly detection hasn't run yet
-                    "anomalies": [],
-                    "metrics": {}
-                }
-            )
-
-            # Store in verdict for quality gates
-            verdict["quality_dimensions"] = dimension_report.to_dict()
-
-            # Use dimension overall_score as primary quality metric
-            weighted_quality_score = dimension_report.overall_score
-            verdict["profile"]["weighted_quality_score"] = weighted_quality_score
-
-            # Extract dimension breakdown for logging
-            dim_scores = {d.name: d.score for d in dimension_report.dimensions}
-
-            print(f"   Weighted Quality Score: {weighted_quality_score:.1f}% " +
-                  f"(Completeness: {dim_scores.get('Completeness', 0):.0f}%, " +
-                  f"Validity: {dim_scores.get('Validity', 0):.0f}%, " +
-                  f"Accuracy: {dim_scores.get('Accuracy', 0):.0f}%)")
-
-            dimension_scoring_success = True
-
-        except Exception as e:
-            print(f"⚠️  Failed to calculate dimension scores: {e}")
-            # Fallback to old quality score
-            weighted_quality_score = profile_report.overall_quality_score
-            verdict["quality_dimensions"] = None
-            dimension_scoring_success = False
-
-        _dimension_duration = int((time.time() - _dimension_start) * 1000)
-
-        # Log dimension scoring to tool_outputs
-        tool_logger.log_simple(
-            tool_name="dimension_scorer",
-            status="SUCCESS" if dimension_scoring_success else "ERROR",
-            output={
-                "overall_score": weighted_quality_score,
-                "weights_source": "custom" if custom_weights else "default",
-                "dimension_count": 6 if dimension_scoring_success else 0
-            },
-            duration_ms=_dimension_duration
-        )
-
-        # Block if quality score is critically low
-        # Use weighted dimension score if available, fallback to old score
-        effective_quality_score = verdict["profile"].get("weighted_quality_score",
-                                                           profile_report.overall_quality_score)
-        score_type = "Weighted 6D" if "weighted_quality_score" in verdict["profile"] else "Simple average"
-
-        if effective_quality_score < qs_block:
-            verdict["status"] = "BLOCKED"
-            verdict["reason"] = (
-                f"Data Quality Score critically low: {effective_quality_score:.1f}% "
-                f"(threshold: {qs_block}%). Score type: {score_type}"
-            )
-            verdict["actions"] = ["Quarantine", "Investigate Value Violations"]
-            verdict["load_status"] = "SKIPPED (Quality too low)"
-            self._record_run(dataset_name, verdict, file_path, _start_time)
-            return self._enrich_with_llm(verdict)
-
-        elif effective_quality_score < qs_warn:
-            verdict["status"] = "WARNING"
-            verdict["reason"] = (
-                f"Data Quality Score below threshold: {effective_quality_score:.1f}% "
-                f"(threshold: {qs_warn}%). Score type: {score_type}"
-            )
-
-        # ---------------------------------------------------------
-        # Stage B: Anomaly Detection (The "Soft" Gate)
-        # ---------------------------------------------------------
-        print(f"\n📉 [Stage B] Checking Network Anomalies for '{dataset_name}'...")
-
-        anomaly_inputs: Dict[str, Any] = {
-            "row_count": {
-                "value": len(df),
-                "metric_group": "volume",
-                "segment": "global",
-                "tags": {"source": "pipeline"},
-            }
-        }
-        try:
-            freshness_age_minutes = max(0.0, (time.time() - Path(file_path).stat().st_mtime) / 60.0)
-            freshness_payload = {
-                "value": freshness_age_minutes,
-                "metric_group": "freshness",
-                "segment": "global",
-                "tags": {"source": "filesystem"},
-            }
-            if slo_targets.get("freshness_max_minutes") is not None:
-                freshness_payload["tags"]["slo_target_minutes"] = float(slo_targets["freshness_max_minutes"])
-            anomaly_inputs["freshness_age_minutes"] = freshness_payload
-        except Exception:
-            pass
-
-        # Run Detection (Pass DF for distribution checks)
-        _anomaly_start = time.time()
-        anomaly_report = self.anomaly_detector.evaluate_run(dataset_name,
-                                                            anomaly_inputs,
-                                                            dataframe=df)
-        _anomaly_duration = int((time.time() - _anomaly_start) * 1000)
-
-        # Log anomaly detection
-        tool_logger.log_simple(
-            tool_name="anomaly_detector",
-            status=anomaly_report["status"],
-            output={
-                "status": anomaly_report["status"],
-                "anomaly_count": len(anomaly_report.get("anomalies", [])),
-                "metrics_checked": len(anomaly_report.get("metrics", {}))
-            },
-            duration_ms=_anomaly_duration
-        )
-
-        if anomaly_report["status"] == "ANOMALY_DETECTED":
-            # Check Impact Analysis
-            print(f"\n🎯 [Impact Analysis] Assessing Criticality...")
-            _impact_start = time.time()
-            impact = self.impact_analyzer.get_downstream_impact(dataset_name)
-            _impact_duration = int((time.time() - _impact_start) * 1000)
-            criticality = impact.get("overall_criticality", "LOW")
-
-            # Log impact analysis
-            tool_logger.log_simple(
-                tool_name="impact_analyzer",
-                status="SUCCESS",
-                output={
-                    "overall_criticality": criticality,
-                    "downstream_count": len(impact.get("downstream", []))
-                },
-                duration_ms=_impact_duration
-            )
-            
-            verdict["anomalies"] = anomaly_report["anomalies"]
-            verdict["metrics"] = anomaly_report.get("metrics", {})
-            
-            # Decision Matrix
-            # We look at the max Z-Score to determine severity
-            max_z = 0.0
-            for anomaly in anomaly_report["anomalies"]:
-                z = abs(anomaly.get("z_score", 0))
-                if z > max_z: max_z = z
-            
-            if criticality in ["HIGH", "CRITICAL"] and max_z > z_critical:
-                verdict["status"] = "BLOCKED"
-                verdict["reason"] = f"CRITICAL ANOMALY (Z={max_z:.1f}, threshold={z_critical}) on HIGH IMPACT dataset."
-                verdict["actions"] = ["Quarantine", "Alert Execs"]
-            
-            elif criticality == "LOW" and max_z > z_critical:
-                verdict["status"] = "WARNING"
-                verdict["reason"] = f"Anomaly detected (Z={max_z:.1f}), but impact is LOW."
-                verdict["actions"] = ["Proceed to Load", "Log Warning"]
-            
-            elif max_z > z_warn:
-                # Above warning threshold but below critical
-                verdict["status"] = "WARNING"
-                verdict["reason"] = f"Anomaly detected (Z={max_z:.1f}, warning threshold={z_warn})."
-        
-        # Always attach statistical metrics to verdict so they get saved to history
-        verdict["metrics"] = anomaly_report.get("metrics", {})
-        
-        # ---------------------------------------------------------
-        # Stage C: The Action (Load or Skip)
-        # ---------------------------------------------------------
-        if verdict["status"] in ["PASSED", "WARNING"]:
-            try:
-                print(f"🚀 [Stage C] Loading Data into Doris...")
-                _load_start = time.time()
-                load_result = self.loader.load_data(df, dataset_name)
-                _load_duration = int((time.time() - _load_start) * 1000)
-                verdict["load_status"] = load_result
-
-                # Log doris loader
-                tool_logger.log_simple(
-                    tool_name="doris_loader",
-                    status="SUCCESS" if load_result.get("success") else "ERROR",
-                    output=load_result,
-                    duration_ms=_load_duration
-                )
-            except Exception as e:
-                # Don't BLOCK purely on infra failures (like local DB down)
-                # Keep the Quality Verdict (PASSED/WARNING) but note the infra failure
-                error_msg = str(e).lower()
-                if "connection refused" in error_msg or "max retries exceeded" in error_msg:
-                    root_cause = self._diagnose_root_cause(dataset_name)
-                    note = f" (Note: Load skipped - Local DB unreachable. Root Cause: {root_cause})"
-                    verdict["reason"] += note
-                    verdict["load_status"] = "SKIPPED (Infra Error)"
-                    verdict["status"] = "WARNING"
-                else:
-                    verdict["status"] = "BLOCKED"  # Real load errors might still block
-                    verdict["reason"] += f" (Load Failed: {str(e)})"
-                    verdict["load_status"] = {"error": str(e)}
-        else:
-            verdict["load_status"] = "SKIPPED (Blocked by Agent)"
-
-        # ---------------------------------------------------------
-        # Stage D: Record to System Tables & Return Verdict
-        # ---------------------------------------------------------
-        self._record_run(dataset_name, verdict, file_path, _start_time)
-        return self._enrich_with_llm(verdict)
+        self._record_run(dataset_name, ctx.verdict, file_path, start_time)
+        return self._enrich_with_llm(ctx.verdict)
 
     def _record_run(self, dataset_name: str, verdict: Dict[str, Any],
                     file_path: str, start_time: float):
@@ -694,7 +396,13 @@ class MonitorAgent:
         import time as _time
         duration_ms = int((_time.time() - start_time) * 1000)
 
-        quality_score = verdict.get("profile", {}).get("overall_quality_score", 0.0)
+        profile_payload = verdict.get("profile", {}) if isinstance(verdict.get("profile"), dict) else {}
+        quality_score = profile_payload.get("weighted_quality_score", profile_payload.get("overall_quality_score", 0.0))
+        try:
+            quality_score = float(quality_score)
+        except Exception:
+            quality_score = 0.0
+        verdict["quality_score"] = quality_score
         anomaly_count = len(verdict.get("anomalies", []))
         max_z = max((abs(a.get("z_score", 0)) for a in verdict.get("anomalies", [])), default=0.0)
         verdict["slos"] = self._evaluate_slos(dataset_name, verdict, file_path)
@@ -724,11 +432,19 @@ class MonitorAgent:
             # Base metrics from Profile (Quality Scores)
             if "profile" in verdict:
                 metrics_payload["quality_score"] = {
-                    "value": verdict["profile"]["overall_quality_score"],
+                    "value": quality_score,
                     "metric_group": "quality",
                     "segment": "global",
-                    "tags": {"source": "profile"},
+                    "tags": {"source": "profile", "quality_score_type": "weighted_6d"},
                 }
+                legacy_overall = verdict["profile"].get("overall_quality_score")
+                if isinstance(legacy_overall, (int, float)):
+                    metrics_payload["profile_overall_quality_score"] = {
+                        "value": float(legacy_overall),
+                        "metric_group": "quality",
+                        "segment": "global",
+                        "tags": {"source": "profile", "quality_score_type": "legacy_profile_average"},
+                    }
                 # Add column-level scores
                 for col, score in verdict["profile"].get("column_scores", {}).items():
                     metrics_payload[f"{col}_quality_score"] = {
@@ -772,6 +488,20 @@ class MonitorAgent:
                     dataset_name=dataset_name,
                     slo_results=slo_checks,
                 )
+
+            # Persist diagnostics evidence (failed rows/checks) for faster triage.
+            try:
+                from src.services.diagnostics_service import DiagnosticsService
+
+                diagnostics_service = DiagnosticsService()
+                inserted = diagnostics_service.record_from_verdict(
+                    run_id=str(run_id),
+                    dataset_name=dataset_name,
+                    verdict=verdict,
+                )
+                verdict["diagnostics_record_count"] = int(inserted)
+            except Exception as diag_err:
+                print(f"⚠️ Diagnostics persistence failed: {diag_err}")
             
             # Update dataset registry
             file_mtime = None
@@ -787,6 +517,11 @@ class MonitorAgent:
                 criticality = impact.get("overall_criticality", "UNKNOWN")
             except Exception:
                 criticality = "UNKNOWN"
+            lineage_context = {}
+            try:
+                lineage_context = self.impact_analyzer.get_lineage_context(dataset_name, max_depth=2)
+            except Exception:
+                lineage_context = {}
             
             contract_path = str(self.contract_store.path_for(dataset_name))
             
@@ -801,7 +536,9 @@ class MonitorAgent:
             # Send Alert
             self.alert_router.send_alert(verdict, {
                 "criticality": criticality, 
-                "owner": owner
+                "owner": owner,
+                "lineage_impact": impact,
+                "lineage_context": lineage_context,
             })
 
             self.anomaly_detector.update_dataset_registry(
@@ -812,6 +549,29 @@ class MonitorAgent:
                 status=verdict["status"],
                 file_mtime=file_mtime,
             )
+
+            # Incident lifecycle sync (OPEN/ACK/RESOLVED)
+            try:
+                from src.services.incident_service import IncidentService
+
+                incident_service = IncidentService()
+                incident_service.sync_with_run(
+                    run_id=run_id,
+                    dataset_name=dataset_name,
+                    run_status=verdict["status"],
+                    reason=verdict.get("reason", ""),
+                    quality_score=float(quality_score or 0.0),
+                    anomaly_count=int(anomaly_count or 0),
+                    z_score_max=float(max_z or 0.0),
+                    owner=owner if owner and owner != "Unknown" else None,
+                    metadata={
+                        "criticality": criticality,
+                        "impacted_consumers": impact.get("impacted_consumers", []) if isinstance(impact, dict) else [],
+                        "lineage_context": lineage_context if isinstance(lineage_context, dict) else {},
+                    },
+                )
+            except Exception as incident_err:
+                print(f"⚠️ Incident sync failed: {incident_err}")
             
             print(f"📊 System Tables: Recorded run for '{dataset_name}' "
                   f"(status={verdict['status']}, duration={duration_ms}ms)")
@@ -966,7 +726,12 @@ class MonitorAgent:
             for file_path in directory.glob("*"):
                 if not self._is_supported_data_file(file_path):
                     continue
-                logical_name = self._extract_dataset_name_from_stem(file_path.stem)
+                stem = file_path.stem
+                # Prefer exact/prefix matching for managed datasets (supports names with underscores).
+                if stem == dataset_name or stem.startswith(f"{dataset_name}_"):
+                    candidates.append(file_path)
+                    continue
+                logical_name = self._extract_dataset_name_from_stem(stem)
                 if logical_name == dataset_name:
                     candidates.append(file_path)
 
@@ -975,6 +740,76 @@ class MonitorAgent:
 
         latest = max(candidates, key=lambda p: p.stat().st_mtime)
         return str(latest)
+
+    def _discover_connector_index(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Discover datasets from configured connectors and index by dataset name.
+        """
+        index: Dict[str, Dict[str, Any]] = {}
+        for connector in self.connectors:
+            connector_name = str(getattr(connector, "name", "")).strip() or "connector"
+            try:
+                discovered = connector.discover()
+            except Exception as exc:
+                print(f"⚠️ Connector discover failed ({connector_name}): {exc}")
+                continue
+
+            for item in discovered or []:
+                metadata = dict(item.metadata or {})
+                metadata.setdefault("connector", connector_name)
+                index[item.name] = {
+                    "connector_name": connector_name,
+                    "source_type": connector_name,
+                    "source_format": item.format,
+                    "source_location": item.location,
+                    "source_metadata": metadata,
+                }
+        return index
+
+    def _build_connector_dataset(self, dataset_meta: Dict[str, Any]) -> ConnectorDataset:
+        name = str(dataset_meta.get("name") or "").strip()
+        location = str(dataset_meta.get("source_location") or name).strip()
+        data_format = str(dataset_meta.get("source_format") or "connector_table").strip()
+        metadata = dataset_meta.get("source_metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return ConnectorDataset(name=name, location=location, format=data_format, metadata=metadata)
+
+    def evaluate_discovered_dataset(self, dataset_meta: Dict[str, Any], force_load: bool = False) -> Dict[str, Any]:
+        """
+        Evaluate a discovered dataset entry from discover_datasets().
+        Supports local file datasets and connector-backed datasets.
+        """
+        dataset_name = str(dataset_meta.get("name") or "").strip()
+        if not dataset_name:
+            raise ValueError("dataset_name is required")
+
+        data_file = dataset_meta.get("data_file")
+        if data_file:
+            return self.evaluate_data_file(str(data_file), dataset_name, force_load=force_load)
+
+        connector_name = str(dataset_meta.get("connector_name") or "").strip()
+        if not connector_name:
+            raise FileNotFoundError(f"Data file for {dataset_name} not found")
+
+        connector = self.connectors_by_name.get(connector_name)
+        if connector is None:
+            raise RuntimeError(f"Connector '{connector_name}' is not configured")
+
+        connector_dataset = self._build_connector_dataset(dataset_meta)
+        sample_limit = int(os.getenv("DRE_CONNECTOR_EVAL_SAMPLE_LIMIT", "1000"))
+        rows = connector.read_sample(connector_dataset, limit=max(1, min(sample_limit, 10000)))
+        if not rows:
+            raise RuntimeError(f"Connector sample for {dataset_name} returned no rows")
+
+        import pandas as pd
+
+        stage_dir = Path("data/staged_connector")
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", dataset_name)
+        staged_path = stage_dir / f"{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.csv"
+        pd.DataFrame(rows).to_csv(staged_path, index=False)
+        return self.evaluate_data_file(str(staged_path), dataset_name)
 
     # ---------------------------------------------------------
     # Phase 1: Schema-Level Auto-Discovery
@@ -998,6 +833,7 @@ class MonitorAgent:
         
         datasets = []
         contract_files = self.contract_store.list_paths()
+        connector_index = self._discover_connector_index()
         
         for contract_file in contract_files:
             # Skip backup files
@@ -1026,6 +862,7 @@ class MonitorAgent:
                 
                 # Resolve the latest physical file currently associated with this dataset
                 data_file = self._find_latest_data_file(dataset_name)
+                source_info = connector_index.get(dataset_name, {})
                 
                 datasets.append({
                     "name": dataset_name,
@@ -1040,6 +877,11 @@ class MonitorAgent:
                     "owner": info.get("owner", "Unknown"),
                     "domain": info.get("domain", "Unknown"),
                     "version": info.get("version", "0.0.0"),
+                    "connector_name": source_info.get("connector_name"),
+                    "source_type": source_info.get("source_type"),
+                    "source_format": source_info.get("source_format"),
+                    "source_location": source_info.get("source_location"),
+                    "source_metadata": source_info.get("source_metadata"),
                 })
                 
             except Exception as e:
@@ -1058,13 +900,38 @@ class MonitorAgent:
                     "domain": "Unknown",
                     "version": "0.0.0",
                     "error": str(e),
+                    "connector_name": None,
+                    "source_type": None,
+                    "source_format": None,
+                    "source_location": None,
+                    "source_metadata": {},
                 })
         
         # -------------------------------------------------------------
         # Phase 1.5: Discover Unmanaged Files (No Contract Yet)
         # -------------------------------------------------------------
+        # Unmanaged discovery is useful in the default runtime, but it makes unit
+        # tests brittle when they point contracts_path at a temp directory while
+        # the repo root contains unrelated sample data files.
         managed_datasets = {d["name"] for d in datasets}
+        try:
+            contracts_root = Path(getattr(self.contract_store, "root_path", self.contracts_path)).resolve()
+        except Exception:
+            contracts_root = Path(self.contracts_path).resolve()
+        default_contracts_root = Path(os.getenv("CONTRACTS_PATH", "config/expectations")).resolve()
+        discover_unmanaged = os.getenv("DRE_DISCOVER_UNMANAGED", "1").strip() != "0" and contracts_root == default_contracts_root
+
         data_dirs = ["data/test", "data/landing", "data/pending_approval", "data"]
+
+        if not discover_unmanaged:
+            print(f"\n📂 Auto-Discovery: Found {len(datasets)} dataset contract(s)")
+            for ds in datasets:
+                icon = "✅" if ds.get("data_file") or ds.get("connector_name") else "⚠️"
+                print(
+                    f"   {icon} {ds['name']} ({ds['column_count']} cols, "
+                    f"criticality={ds['criticality']}, lifecycle={ds['lifecycle']})"
+                )
+            return datasets
         
         for d_dir in data_dirs:
             path = Path(d_dir)
@@ -1075,9 +942,13 @@ class MonitorAgent:
             for file_path in path.glob("*"):
                 if not self._is_supported_data_file(file_path):
                     continue
+
+                stem = file_path.stem
+                if any(stem == managed or stem.startswith(f"{managed}_") for managed in managed_datasets):
+                    continue
                     
                 # Extract stable dataset id (e.g. newdata_2026-02-15 -> newdata)
-                candidate_name = self._extract_dataset_name_from_stem(file_path.stem)
+                candidate_name = self._extract_dataset_name_from_stem(stem)
                     
                 # If already managed, skip
                 if candidate_name in managed_datasets:
@@ -1102,13 +973,48 @@ class MonitorAgent:
                     "criticality": "UNKNOWN",
                     "owner": "Unassigned",
                     "domain": "Discovered",
-                    "version": "0.0.0"
+                    "version": "0.0.0",
+                    "connector_name": None,
+                    "source_type": "local_files",
+                    "source_format": file_path.suffix.lstrip(".").lower(),
+                    "source_location": str(file_path),
+                    "source_metadata": {},
                 })
                 managed_datasets.add(candidate_name) # Prevent duplicates across dirs
+
+        for connector_dataset_name, source_info in connector_index.items():
+            if connector_dataset_name in managed_datasets:
+                continue
+            print(
+                f"   🆕 Discovered unmanaged connector dataset: "
+                f"{source_info.get('source_location') or connector_dataset_name}"
+            )
+            datasets.append(
+                {
+                    "name": connector_dataset_name,
+                    "contract_path": None,
+                    "data_file": None,
+                    "column_count": 0,
+                    "columns": [],
+                    "has_quality_rules": False,
+                    "has_anomaly_thresholds": False,
+                    "lifecycle": "unconfigured",
+                    "criticality": "UNKNOWN",
+                    "owner": "Unassigned",
+                    "domain": f"Discovered/{source_info.get('source_type') or 'connector'}",
+                    "version": "0.0.0",
+                    "connector_name": source_info.get("connector_name"),
+                    "source_type": source_info.get("source_type"),
+                    "source_format": source_info.get("source_format"),
+                    "source_location": source_info.get("source_location"),
+                    "source_metadata": source_info.get("source_metadata") or {},
+                }
+            )
+            managed_datasets.add(connector_dataset_name)
         
         print(f"\n📂 Auto-Discovery: Found {len(datasets)} dataset contract(s)")
         for ds in datasets:
-            icon = "✅" if ds.get("data_file") else "⚠️"
+            icon = "✅" if ds.get("data_file") or ds.get("connector_name") else "⚠️"
             print(f"   {icon} {ds['name']} ({ds['column_count']} cols, "
                   f"criticality={ds['criticality']}, lifecycle={ds['lifecycle']})")
         
@@ -1156,9 +1062,23 @@ class MonitorAgent:
             # Find data file
             data_file = ds.get("data_file")
             if not data_file:
+                # Prefer explicit data_dir argument for batch evaluation.
+                try:
+                    base = Path(data_dir)
+                    if base.exists():
+                        for candidate in base.glob(f"{name}.*"):
+                            if self._is_supported_data_file(candidate):
+                                data_file = str(candidate)
+                                break
+                except Exception:
+                    data_file = None
+
+            if not data_file:
                 data_file = self._find_latest_data_file(name)
             
-            if not data_file:
+            connector_available = bool(ds.get("connector_name"))
+
+            if not data_file and not connector_available:
                 print(f"\n⏭️  Skipping '{name}' (no data file found)")
                 results[name] = {"status": "SKIPPED", "reason": "No data file found"}
                 summary["skipped"] += 1
@@ -1190,12 +1110,17 @@ class MonitorAgent:
                 except Exception:
                     pass  # If registry check fails, just scan anyway
             
+            source_ref = data_file or ds.get("source_location") or "<connector>"
             print(f"\n{'='*60}")
-            print(f"🔍 Evaluating: {name} ({data_file})")
+            print(f"🔍 Evaluating: {name} ({source_ref})")
             print(f"{'='*60}")
             
             try:
-                result = self.evaluate_data_file(data_file, name)
+                effective_meta = dict(ds)
+                if data_file and not effective_meta.get("data_file"):
+                    effective_meta["data_file"] = data_file
+
+                result = self.evaluate_discovered_dataset(effective_meta)
                 results[name] = result
                 
                 status = result.get("status", "UNKNOWN")
@@ -1249,7 +1174,7 @@ class MonitorAgent:
                 if dataset_name:
                     cur.execute("""
                         SELECT run_id, timestamp, dataset_name, status,
-                               quality_score, anomaly_count, z_score_max, reason, duration_ms
+                               quality_score, anomaly_count, z_score_max, reason, duration_ms, dimension_scores
                         FROM run_history
                         WHERE dataset_name = %s
                         ORDER BY timestamp DESC LIMIT %s
@@ -1257,21 +1182,40 @@ class MonitorAgent:
                 else:
                     cur.execute("""
                         SELECT run_id, timestamp, dataset_name, status,
-                               quality_score, anomaly_count, z_score_max, reason, duration_ms
+                               quality_score, anomaly_count, z_score_max, reason, duration_ms, dimension_scores
                         FROM run_history
                         ORDER BY timestamp DESC LIMIT %s
                     """, (limit,))
 
                 rows = cur.fetchall()
-                return [
-                    {
-                        "run_id": r[0], "timestamp": r[1].isoformat() if r[1] else None,
-                        "dataset": r[2], "status": r[3], "quality_score": r[4],
-                        "anomaly_count": r[5], "z_score_max": r[6],
-                        "reason": r[7], "duration_ms": r[8],
-                    }
-                    for r in rows
-                ]
+                history = []
+                for r in rows:
+                    effective_quality = r[4]
+                    dim_payload = r[9]
+                    if isinstance(dim_payload, str):
+                        try:
+                            dim_payload = json.loads(dim_payload)
+                        except Exception:
+                            dim_payload = None
+                    if isinstance(dim_payload, dict):
+                        overall = dim_payload.get("overall_score")
+                        if isinstance(overall, (int, float)):
+                            effective_quality = float(overall)
+
+                    history.append(
+                        {
+                            "run_id": r[0],
+                            "timestamp": r[1].isoformat() if r[1] else None,
+                            "dataset": r[2],
+                            "status": r[3],
+                            "quality_score": effective_quality,
+                            "anomaly_count": r[5],
+                            "z_score_max": r[6],
+                            "reason": r[7],
+                            "duration_ms": r[8],
+                        }
+                    )
+                return history
 
     def request_copilot_chat(self, user_query: str, context_data: Dict[str, Any]) -> str:
         """
@@ -1285,6 +1229,7 @@ class MonitorAgent:
         # 1. Prepare Context String
         discovered = context_data.get("discovered", [])
         results = context_data.get("results", {})
+        request_context = context_data.get("request_context", {})
         
         context_str = "### SYSTEM STATE ###\n"
         context_str += f"Total Datasets: {len(discovered)}\n"
@@ -1295,15 +1240,26 @@ class MonitorAgent:
             status = res.get("status", "UNKNOWN")
             reason = res.get("reason", "No data")
             crit = ds.get("criticality", "UNKNOWN")
-            # Calculate health score dynamically if possible, or pass it in.
-            # approximating from status for context
-            health_est = "100%" if status == "PASSED" else "60%" if status == "WARNING" else "10%"
-            
-            context_str += f"- Dataset: {name} | Status: {status} | Health: {health_est} | Crit: {crit} | Reason: {reason}\n"
+            quality_score = res.get("quality_score")
+            try:
+                quality_text = f"{float(quality_score):.2f}%"
+            except Exception:
+                quality_text = "n/a"
+
+            context_str += f"- Dataset: {name} | Status: {status} | Quality Score: {quality_text} | Crit: {crit} | Reason: {reason}\n"
             if res.get("anomalies"):
                 context_str += f"  - Anomalies: {len(res['anomalies'])} detected (Max Z-Score: {max((a.get('z_score',0) for a in res['anomalies']), default=0):.1f})\n"
             if res.get("schema_evolution", {}).get("missing_columns"):
                 context_str += f"  - Schema Issues: Missing cols {res['schema_evolution']['missing_columns']}\n"
+
+        context_json = ""
+        if isinstance(request_context, dict) and request_context:
+            try:
+                context_json = json.dumps(request_context, default=str, indent=2)
+            except Exception:
+                context_json = "{}"
+            if len(context_json) > 12000:
+                context_json = context_json[:12000] + "\n... (truncated)"
 
         # 2. Define System Prompt
         system_prompt = """
@@ -1323,7 +1279,7 @@ You are the Agentic DRE Copilot. Your goal is to answer questions about the data
    - **Tier 1 (Status Check)**: User asks "What is the status/health?" 
      -> Provide ONLY: Status, Criticality, Health Score, and the PRIMARY reason.
    - **Tier 2 (Deep Dive)**: User asks "Why?" or "Details?" 
-     -> Provide: Z-Scores, specific column names, exact schema mismatches.
+     -> Provide: exact evidence fields from context (run_id, status, reason, failing metrics/checks, failing tool output).
    - **Tier 3 (Remediation)**: User asks "How do I fix this?" 
      -> Provide: Step-by-step action plan.
 
@@ -1332,14 +1288,26 @@ You are the Agentic DRE Copilot. Your goal is to answer questions about the data
    - If the answer is short (Tier 1), use a single paragraph or checkmark list. No big headers.
    - **Conciseness Rule**: If you can answer in 2 sentences, do it.
 
+5. **FACTUALITY (HARD RULE)**:
+   - Never infer "Health Score" from status.
+   - Use provided numeric quality score when available.
+   - If a value is missing, say "unavailable" instead of guessing.
+   - If load failed but checks passed, explicitly state that distinction.
+6. **MULTI-TURN CONTEXT**:
+   - If REQUEST CONTEXT includes `conversation_turns`, use it to resolve follow-up references like "that", "it", "this run".
+   - If REQUEST CONTEXT includes `dataset_context`, prioritize those concrete artifacts (contract, 6D scores, latest verdict, sample rows).
+
 ### AVAILABLE CONTEXT:
 {context_str}
+
+### REQUEST CONTEXT (if provided by UI):
+{context_json}
 """
         # 3. Create Ephemeral Agent for this turn
         chat_agent = Agent(
             model=OpenAIChat(id=os.getenv("OPENAI_MODEL_NAME", "gpt-4o")),
             description="You are a precise Data Reliability Engineer.",
-            instructions=system_prompt.format(context_str=context_str),
+            instructions=system_prompt.format(context_str=context_str, context_json=context_json or "{}"),
             markdown=True
         )
         
@@ -1354,33 +1322,51 @@ You are the Agentic DRE Copilot. Your goal is to answer questions about the data
         # 1. Find the file
         datasets = self.discover_datasets()
         meta = next((d for d in datasets if d["name"] == dataset_name), None)
-        
-        if not meta or not meta.get("data_file"):
+
+        if not meta:
             raise FileNotFoundError(f"Data file for {dataset_name} not found")
-            
-        file_path = meta["data_file"]
-        
-        # 2. Read data based on extension
+
+        data_file = meta.get("data_file")
+        if data_file:
+            # 2. Read local data based on extension
+            try:
+                import pandas as pd
+
+                if data_file.lower().endswith('.parquet'):
+                    df = pd.read_parquet(data_file)
+                elif data_file.lower().endswith('.json'):
+                    df = pd.read_json(data_file)
+                else:
+                    # Default to CSV for .csv and other text-based formats
+                    df = pd.read_csv(data_file)
+
+                total_rows = len(df)
+                # 3. Sample and convert to dict
+                # Replace NaN with None for JSON compatibility
+                df = df.head(limit).replace({float('nan'): None})
+
+                return {
+                    "columns": list(df.columns),
+                    "data": df.to_dict(orient="records"),
+                    "total_rows": total_rows,
+                    "preview_limit": limit
+                }
+            except Exception as e:
+                raise RuntimeError(f"Failed to read data file: {str(e)}")
+
+        connector_name = str(meta.get("connector_name") or "").strip()
+        connector = self.connectors_by_name.get(connector_name) if connector_name else None
+        if connector is None:
+            raise FileNotFoundError(f"Data source for {dataset_name} not found")
+
         try:
-            import pandas as pd
-            
-            if file_path.lower().endswith('.parquet'):
-                df = pd.read_parquet(file_path)
-            elif file_path.lower().endswith('.json'):
-                df = pd.read_json(file_path)
-            else:
-                # Default to CSV for .csv and other text-based formats
-                df = pd.read_csv(file_path)
-                
-            # 3. Sample and convert to dict
-            # Replace NaN with None for JSON compatibility
-            df = df.head(limit).replace({float('nan'): None})
-            
+            rows = connector.read_sample(self._build_connector_dataset(meta), limit=limit)
+            columns = list(rows[0].keys()) if rows else []
             return {
-                "columns": list(df.columns),
-                "data": df.to_dict(orient="records"),
-                "total_rows": len(df), # This might correspond to the full file if read_parquet reads all locally
-                "preview_limit": limit
+                "columns": columns,
+                "data": rows,
+                "total_rows": len(rows),
+                "preview_limit": limit,
             }
-        except Exception as e:
-            raise RuntimeError(f"Failed to read data file: {str(e)}")
+        except Exception as exc:
+            raise RuntimeError(f"Failed to read connector dataset: {exc}")

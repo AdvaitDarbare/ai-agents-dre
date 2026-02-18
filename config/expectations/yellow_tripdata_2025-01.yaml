@@ -1,0 +1,102 @@
+kind: DataContract
+apiVersion: v3.1.0
+id: urn:datacontract:yellow_tripdata_2025-01
+table_name: yellow_tripdata_2025-01
+description: Deterministic fallback contract generated from yellow_tripdata_2025-01.parquet
+info:
+  title: yellow_tripdata_2025-01
+  owner: Unassigned
+  domain: Unknown
+  lifecycle: active
+  version: 1.0.0
+quality:
+  min_rows: 1
+  anomaly_thresholds:
+    z_score_warning: 2.5
+    z_score_critical: 3.0
+    quality_score_warn: 80
+    quality_score_block: 50
+  slos:
+    min_quality_score: 80
+    max_anomaly_count: 0
+columns:
+- name: VendorID
+  data_type: integer
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): int32'
+- name: tpep_pickup_datetime
+  data_type: timestamp
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): timestamp[us]'
+- name: tpep_dropoff_datetime
+  data_type: timestamp
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): timestamp[us]'
+- name: passenger_count
+  data_type: integer
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): int64'
+- name: trip_distance
+  data_type: double
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): double'
+- name: RatecodeID
+  data_type: integer
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): int64'
+- name: store_and_fwd_flag
+  data_type: varchar
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): large_string'
+- name: PULocationID
+  data_type: integer
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): int32'
+- name: DOLocationID
+  data_type: integer
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): int32'
+- name: payment_type
+  data_type: integer
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): int64'
+- name: fare_amount
+  data_type: double
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): double'
+- name: extra
+  data_type: double
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): double'
+- name: mta_tax
+  data_type: double
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): double'
+- name: tip_amount
+  data_type: double
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): double'
+- name: tolls_amount
+  data_type: double
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): double'
+- name: improvement_surcharge
+  data_type: double
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): double'
+- name: total_amount
+  data_type: double
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): double'
+- name: congestion_surcharge
+  data_type: double
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): double'
+- name: Airport_fee
+  data_type: double
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): double'
+- name: cbd_congestion_fee
+  data_type: double
+  nullable: true
+  description: 'Inferred from Parquet metadata (pyarrow): double'

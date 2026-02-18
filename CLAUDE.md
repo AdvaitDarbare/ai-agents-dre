@@ -1,5 +1,7 @@
 # Agentic DRE Platform
 
+Compatibility note: canonical coding-agent instructions live in `AGENTS.md`.
+
 Agentic Data Reliability Engineering platform. Sequential pipeline: Schema Validation -> Data Profiling -> Anomaly Detection -> Impact Analysis -> Load/Quarantine -> LLM Reasoning.
 
 ## Quick Start

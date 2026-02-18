@@ -1,0 +1,36 @@
+networks:
+  doris_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.80.0/24
+
+services:
+  fe:
+    image: apache/doris:fe-2.1.8
+    hostname: fe
+    ports:
+      - 8030:8030
+      - 9030:9030
+      - 9010:9010
+    environment:
+      - FE_SERVERS=fe1:172.21.80.2:9010
+      - FE_ID=1
+    networks:
+      doris_network:
+        ipv4_address: 172.21.80.2
+
+  be:
+    image: apache/doris:be-2.1.8
+    hostname: be
+    ports:
+      - 8040:8040
+      - 9050:9050
+    environment:
+      - FE_SERVERS=fe1:172.21.80.2:9010
+      - BE_ADDR=172.21.80.3:9050
+    depends_on:
+      - fe
+    networks:
+      doris_network:
+        ipv4_address: 172.21.80.3

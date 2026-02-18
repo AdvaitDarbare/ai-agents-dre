@@ -4,6 +4,7 @@ import { Send, Bot, User, Sparkles, X } from 'lucide-react';
 import { chatWithAssistant, proposeContract, aiModifyContract } from '../api';
 
 export default function ContractAssistant({ dataset, onClose }) {
+  const [workingYaml, setWorkingYaml] = useState('');
   const [messages, setMessages] = useState([
     {
       role: 'assistant',
@@ -33,19 +34,30 @@ export default function ContractAssistant({ dataset, onClose }) {
       if (userMessage.toLowerCase().includes('generate contract') ||
           userMessage.toLowerCase().includes('create contract')) {
         const result = await proposeContract(dataset);
+        const proposedYaml = result?.proposed_yaml || '';
+        setWorkingYaml(proposedYaml);
         setMessages(prev => [...prev, {
           role: 'assistant',
-          content: `I've generated a contract proposal for **${dataset}**:\n\n\`\`\`yaml\n${result.contract_yaml}\n\`\`\`\n\nThis contract includes ${result.columns?.length || 0} columns. Would you like me to modify anything?`
+          content: `I've generated a contract proposal for **${dataset}**:\n\n\`\`\`yaml\n${proposedYaml}\n\`\`\`\n\nWould you like me to modify anything?`
         }]);
       }
       // Check for modification intent
       else if (userMessage.toLowerCase().includes('modify') ||
                userMessage.toLowerCase().includes('add') ||
                userMessage.toLowerCase().includes('change')) {
-        const result = await aiModifyContract(dataset, userMessage);
+        if (!workingYaml) {
+          setMessages(prev => [...prev, {
+            role: 'assistant',
+            content: 'Generate or load a contract first so I have YAML to modify.'
+          }]);
+          return;
+        }
+        const result = await aiModifyContract(dataset, userMessage, workingYaml);
+        const modifiedYaml = result?.modified_yaml || workingYaml;
+        setWorkingYaml(modifiedYaml);
         setMessages(prev => [...prev, {
           role: 'assistant',
-          content: `I've updated the contract based on your request:\n\n\`\`\`yaml\n${result.contract_yaml}\n\`\`\`\n\nThe changes have been applied. Anything else?`
+          content: `I've updated the contract based on your request:\n\n\`\`\`yaml\n${modifiedYaml}\n\`\`\`\n\nThe changes have been applied. Anything else?`
         }]);
       }
       // General chat

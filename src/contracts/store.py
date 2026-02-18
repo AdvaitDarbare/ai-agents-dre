@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import List, Optional, Protocol, runtime_checkable
+import os
 import re
+import subprocess
 
 
 @dataclass(frozen=True)
@@ -101,3 +103,72 @@ class FileContractStore:
 
     def list_paths(self) -> List[Path]:
         return sorted(self.root_path.glob("*.yaml"))
+
+
+class GitContractStore(FileContractStore):
+    """
+    Git-backed contract store.
+
+    Contracts are still normal files on disk, but writes can be auto-committed
+    to a git repository for versioned contract governance.
+    """
+
+    def __init__(self, root_path: str = "config/expectations", repo_root: Optional[str] = None):
+        super().__init__(root_path=root_path)
+        self.repo_root = Path(repo_root or os.getenv("CONTRACT_STORE_GIT_ROOT", ".")).resolve()
+        self.auto_commit = os.getenv("CONTRACT_STORE_GIT_AUTO_COMMIT", "0").strip() == "1"
+        self.committer = os.getenv("CONTRACT_STORE_GIT_COMMITTER", "dre-bot")
+
+    def _run_git(self, *args: str) -> bool:
+        try:
+            subprocess.run(
+                ["git", *args],
+                cwd=str(self.repo_root),
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _relative_contract_path(self, path: Path) -> Optional[str]:
+        try:
+            return str(path.resolve().relative_to(self.repo_root))
+        except Exception:
+            return None
+
+    def write(self, dataset_name: str, content: str) -> ContractDocument:
+        doc = super().write(dataset_name, content)
+        rel_path = self._relative_contract_path(Path(doc.location))
+        if not rel_path:
+            return doc
+
+        self._run_git("add", rel_path)
+
+        if self.auto_commit:
+            message = f"contracts: update {dataset_name}"
+            self._run_git(
+                "-c",
+                f"user.name={self.committer}",
+                "-c",
+                f"user.email={self.committer}@local",
+                "commit",
+                "-m",
+                message,
+                "--",
+                rel_path,
+            )
+        return doc
+
+
+def build_contract_store(root_path: str = "config/expectations"):
+    """
+    Factory to choose contract backend by env:
+    - CONTRACT_STORE_BACKEND=file (default)
+    - CONTRACT_STORE_BACKEND=git
+    """
+    backend = os.getenv("CONTRACT_STORE_BACKEND", "file").strip().lower()
+    if backend == "git":
+        return GitContractStore(root_path=root_path)
+    return FileContractStore(root_path=root_path)

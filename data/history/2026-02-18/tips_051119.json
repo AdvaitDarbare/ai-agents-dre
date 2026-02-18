@@ -1,0 +1,931 @@
+{
+  "status": "PASSED",
+  "reason": "All checks passed.",
+  "anomalies": [],
+  "schema_evolution": {
+    "missing_columns": [],
+    "new_columns": [],
+    "type_mismatches": []
+  },
+  "actions": [
+    "Proceed to Load"
+  ],
+  "dataset": "tips",
+  "timestamp": "2026-02-18T05:11:19.546300",
+  "run_id": "d3d9e9b2-5020-4c33-95c6-b57c54be5b56",
+  "schema_result": {
+    "status": "pass",
+    "table_name": "tips",
+    "passed_checks": 7,
+    "failed_checks": 0,
+    "total_issues": 0,
+    "schema_diff": {
+      "missing_columns": [],
+      "new_columns": [],
+      "type_mismatches": []
+    },
+    "issues": []
+  },
+  "criticality": "LOW",
+  "profile": {
+    "overall_quality_score": 100.0,
+    "constraint_violations": [],
+    "custom_check_results": [],
+    "column_scores": {
+      "total_bill": 100.0,
+      "tip": 100.0,
+      "sex": 100.0,
+      "smoker": 100.0,
+      "day": 100.0,
+      "time": 100.0,
+      "size": 100.0
+    },
+    "null_rates": {
+      "total_bill": 0.0,
+      "tip": 0.0,
+      "sex": 0.0,
+      "smoker": 0.0,
+      "day": 0.0,
+      "time": 0.0,
+      "size": 0.0
+    },
+    "violations_detail": {},
+    "column_profiles": {
+      "total_bill": {
+        "name": "total_bill",
+        "type": "double",
+        "total_rows": 244,
+        "null_count": 0,
+        "null_rate": 0.0,
+        "unique_count": 229,
+        "uniqueness_rate": 0.9385,
+        "min_value": "3.07",
+        "max_value": "50.81",
+        "mean_value": 19.7859,
+        "violations": [],
+        "violation_examples": [],
+        "quality_score": 100.0,
+        "contract_nullable": true,
+        "null_policy": {
+          "enabled": true,
+          "mode": "linear",
+          "warn_threshold": 0.01,
+          "fail_threshold": 0.2,
+          "penalized": false,
+          "penalty_pct": 0.0,
+          "explanation": "Nulls are permitted by the YAML contract (nullable=true), but completeness scoring penalizes missingness for quality scoring."
+        }
+      },
+      "tip": {
+        "name": "tip",
+        "type": "double",
+        "total_rows": 244,
+        "null_count": 0,
+        "null_rate": 0.0,
+        "unique_count": 123,
+        "uniqueness_rate": 0.5041,
+        "min_value": "1.0",
+        "max_value": "10.0",
+        "mean_value": 2.9983,
+        "violations": [],
+        "violation_examples": [],
+        "quality_score": 100.0,
+        "contract_nullable": true,
+        "null_policy": {
+          "enabled": true,
+          "mode": "linear",
+          "warn_threshold": 0.01,
+          "fail_threshold": 0.2,
+          "penalized": false,
+          "penalty_pct": 0.0,
+          "explanation": "Nulls are permitted by the YAML contract (nullable=true), but completeness scoring penalizes missingness for quality scoring."
+        }
+      },
+      "sex": {
+        "name": "sex",
+        "type": "varchar",
+        "total_rows": 244,
+        "null_count": 0,
+        "null_rate": 0.0,
+        "unique_count": 2,
+        "uniqueness_rate": 0.0082,
+        "min_value": null,
+        "max_value": null,
+        "mean_value": null,
+        "violations": [],
+        "violation_examples": [],
+        "quality_score": 100.0,
+        "contract_nullable": true,
+        "null_policy": {
+          "enabled": true,
+          "mode": "linear",
+          "warn_threshold": 0.01,
+          "fail_threshold": 0.2,
+          "penalized": false,
+          "penalty_pct": 0.0,
+          "explanation": "Nulls are permitted by the YAML contract (nullable=true), but completeness scoring penalizes missingness for quality scoring."
+        }
+      },
+      "smoker": {
+        "name": "smoker",
+        "type": "boolean",
+        "total_rows": 244,
+        "null_count": 0,
+        "null_rate": 0.0,
+        "unique_count": 2,
+        "uniqueness_rate": 0.0082,
+        "min_value": null,
+        "max_value": null,
+        "mean_value": null,
+        "violations": [],
+        "violation_examples": [],
+        "quality_score": 100.0,
+        "contract_nullable": true,
+        "null_policy": {
+          "enabled": true,
+          "mode": "linear",
+          "warn_threshold": 0.01,
+          "fail_threshold": 0.2,
+          "penalized": false,
+          "penalty_pct": 0.0,
+          "explanation": "Nulls are permitted by the YAML contract (nullable=true), but completeness scoring penalizes missingness for quality scoring."
+        }
+      },
+      "day": {
+        "name": "day",
+        "type": "varchar",
+        "total_rows": 244,
+        "null_count": 0,
+        "null_rate": 0.0,
+        "unique_count": 4,
+        "uniqueness_rate": 0.0164,
+        "min_value": null,
+        "max_value": null,
+        "mean_value": null,
+        "violations": [],
+        "violation_examples": [],
+        "quality_score": 100.0,
+        "contract_nullable": true,
+        "null_policy": {
+          "enabled": true,
+          "mode": "linear",
+          "warn_threshold": 0.01,
+          "fail_threshold": 0.2,
+          "penalized": false,
+          "penalty_pct": 0.0,
+          "explanation": "Nulls are permitted by the YAML contract (nullable=true), but completeness scoring penalizes missingness for quality scoring."
+        }
+      },
+      "time": {
+        "name": "time",
+        "type": "varchar",
+        "total_rows": 244,
+        "null_count": 0,
+        "null_rate": 0.0,
+        "unique_count": 2,
+        "uniqueness_rate": 0.0082,
+        "min_value": null,
+        "max_value": null,
+        "mean_value": null,
+        "violations": [],
+        "violation_examples": [],
+        "quality_score": 100.0,
+        "contract_nullable": true,
+        "null_policy": {
+          "enabled": true,
+          "mode": "linear",
+          "warn_threshold": 0.01,
+          "fail_threshold": 0.2,
+          "penalized": false,
+          "penalty_pct": 0.0,
+          "explanation": "Nulls are permitted by the YAML contract (nullable=true), but completeness scoring penalizes missingness for quality scoring."
+        }
+      },
+      "size": {
+        "name": "size",
+        "type": "integer",
+        "total_rows": 244,
+        "null_count": 0,
+        "null_rate": 0.0,
+        "unique_count": 6,
+        "uniqueness_rate": 0.0246,
+        "min_value": "1.0",
+        "max_value": "6.0",
+        "mean_value": 2.5697,
+        "violations": [],
+        "violation_examples": [],
+        "quality_score": 100.0,
+        "contract_nullable": true,
+        "null_policy": {
+          "enabled": true,
+          "mode": "linear",
+          "warn_threshold": 0.01,
+          "fail_threshold": 0.2,
+          "penalized": false,
+          "penalty_pct": 0.0,
+          "explanation": "Nulls are permitted by the YAML contract (nullable=true), but completeness scoring penalizes missingness for quality scoring."
+        }
+      }
+    },
+    "weighted_quality_score": 85.0
+  },
+  "quality_dimensions": {
+    "dataset_name": "tips",
+    "timestamp": "2026-02-18T12:11:19.577458Z",
+    "overall_score": 85.0,
+    "dimensions": [
+      {
+        "name": "Validity",
+        "score": 100.0,
+        "weight": 0.25,
+        "status": "PASS",
+        "check_count": {
+          "total": 7,
+          "passed": 7,
+          "failed": 0
+        },
+        "violations": []
+      },
+      {
+        "name": "Completeness",
+        "score": 100.0,
+        "weight": 0.25,
+        "status": "PASS",
+        "check_count": {
+          "total": 8,
+          "passed": 8,
+          "failed": 0
+        },
+        "violations": []
+      },
+      {
+        "name": "Uniqueness",
+        "score": 0.0,
+        "weight": 0.15,
+        "status": "FAIL",
+        "check_count": {
+          "total": 7,
+          "passed": 0,
+          "failed": 7
+        },
+        "violations": [
+          "total_bill: low uniqueness (93.8%)",
+          "tip: low uniqueness (50.4%)",
+          "sex: low uniqueness (0.8%)",
+          "smoker: low uniqueness (0.8%)",
+          "day: low uniqueness (1.6%)"
+        ]
+      },
+      {
+        "name": "Accuracy",
+        "score": 100.0,
+        "weight": 0.15,
+        "status": "PASS",
+        "check_count": {
+          "total": 3,
+          "passed": 3,
+          "failed": 0
+        },
+        "violations": []
+      },
+      {
+        "name": "Timeliness",
+        "score": 100.0,
+        "weight": 0.1,
+        "status": "PASS",
+        "check_count": {
+          "total": 1,
+          "passed": 1,
+          "failed": 0
+        },
+        "violations": []
+      },
+      {
+        "name": "Consistency",
+        "score": 100.0,
+        "weight": 0.1,
+        "status": "PASS",
+        "check_count": {
+          "total": 0,
+          "passed": 0,
+          "failed": 0
+        },
+        "violations": []
+      }
+    ],
+    "remediation_status": "OPEN_INCIDENT"
+  },
+  "metrics": {
+    "row_count": {
+      "value": 244.0,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "volume",
+      "column_name": null,
+      "segment": "global",
+      "tags": {
+        "source": "pipeline"
+      }
+    },
+    "freshness_age_minutes": {
+      "value": 7.272932918866475,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "freshness",
+      "column_name": null,
+      "segment": "global",
+      "tags": {
+        "source": "filesystem"
+      }
+    },
+    "duplicate_rate": {
+      "value": 0.004098360655737705,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "uniqueness",
+      "column_name": null,
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "null_rate_total_bill": {
+      "value": 0.0,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "completeness",
+      "column_name": "total_bill",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "distinct_ratio_total_bill": {
+      "value": 0.9385245901639344,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "uniqueness",
+      "column_name": "total_bill",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "null_rate_tip": {
+      "value": 0.0,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "completeness",
+      "column_name": "tip",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "distinct_ratio_tip": {
+      "value": 0.5040983606557377,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "uniqueness",
+      "column_name": "tip",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "null_rate_sex": {
+      "value": 0.0,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "completeness",
+      "column_name": "sex",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "distinct_ratio_sex": {
+      "value": 0.00819672131147541,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "uniqueness",
+      "column_name": "sex",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "null_rate_smoker": {
+      "value": 0.0,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "completeness",
+      "column_name": "smoker",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "distinct_ratio_smoker": {
+      "value": 0.00819672131147541,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "uniqueness",
+      "column_name": "smoker",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "null_rate_day": {
+      "value": 0.0,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "completeness",
+      "column_name": "day",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "distinct_ratio_day": {
+      "value": 0.01639344262295082,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "uniqueness",
+      "column_name": "day",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "null_rate_time": {
+      "value": 0.0,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "completeness",
+      "column_name": "time",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "distinct_ratio_time": {
+      "value": 0.00819672131147541,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "uniqueness",
+      "column_name": "time",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "null_rate_size": {
+      "value": 0.0,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "completeness",
+      "column_name": "size",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "distinct_ratio_size": {
+      "value": 0.02459016393442623,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "uniqueness",
+      "column_name": "size",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "mean_total_bill": {
+      "value": 19.78594262295082,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "distribution",
+      "column_name": "total_bill",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "std_total_bill": {
+      "value": 8.884150577771132,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "distribution",
+      "column_name": "total_bill",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "p95_total_bill": {
+      "value": 38.061,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "distribution",
+      "column_name": "total_bill",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "mean_tip": {
+      "value": 2.99827868852459,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "distribution",
+      "column_name": "tip",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "std_tip": {
+      "value": 1.3807999538298954,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "distribution",
+      "column_name": "tip",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "p95_tip": {
+      "value": 5.1955,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "distribution",
+      "column_name": "tip",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "mean_size": {
+      "value": 2.569672131147541,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "distribution",
+      "column_name": "size",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "std_size": {
+      "value": 0.9491488287193913,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "distribution",
+      "column_name": "size",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    },
+    "p95_size": {
+      "value": 4.0,
+      "baseline_mean": 0.0,
+      "baseline_std_dev": 0.0,
+      "baseline_median": 0.0,
+      "baseline_mad": 0.0,
+      "baseline_type": "initializing",
+      "sample_count": 0,
+      "z_score": 0.0,
+      "robust_z_score": 0.0,
+      "iqr_bounds": null,
+      "methods_triggered": [],
+      "is_anomaly": false,
+      "reason": "Baseline initializing (insufficient history)",
+      "metric_group": "distribution",
+      "column_name": "size",
+      "segment": "global",
+      "tags": {
+        "source": "dataframe"
+      }
+    }
+  },
+  "load_status": {
+    "success": true,
+    "Status": "Success",
+    "Message": "Mock load successful",
+    "NumberTotalRows": 244,
+    "NumberLoadedRows": 244,
+    "LoadUrl": "http://mock-doris/api/_stream_load"
+  },
+  "quality_score": 85.0,
+  "slos": {
+    "dataset_name": "tips",
+    "timestamp": "2026-02-18T12:11:19.609172Z",
+    "overall_status": "PASS",
+    "pass_rate": 100.0,
+    "fail_count": 0,
+    "error_budget_burn_total": 0.0,
+    "error_budget_burn_avg": 0.0,
+    "failing_slos": [],
+    "checks": [
+      {
+        "slo_name": "availability",
+        "operator": ">=",
+        "target": 1.0,
+        "observed": 1.0,
+        "status": "PASS",
+        "error_budget_burn": 0.0,
+        "metadata": {
+          "source": "system",
+          "description": "Run status must not be BLOCKED",
+          "severity": "NONE",
+          "breach_delta": 0.0,
+          "breach_ratio": 0.0
+        }
+      },
+      {
+        "slo_name": "quality_score_min",
+        "operator": ">=",
+        "target": 80.0,
+        "observed": 85.0,
+        "status": "PASS",
+        "error_budget_burn": 0.0,
+        "metadata": {
+          "source": "contract",
+          "severity": "NONE",
+          "breach_delta": 0.0,
+          "breach_ratio": 0.0
+        }
+      },
+      {
+        "slo_name": "anomaly_count_max",
+        "operator": "<=",
+        "target": 0.0,
+        "observed": 0.0,
+        "status": "PASS",
+        "error_budget_burn": 0.0,
+        "metadata": {
+          "source": "contract",
+          "severity": "NONE",
+          "breach_delta": 0.0,
+          "breach_ratio": 0.0
+        }
+      }
+    ]
+  },
+  "diagnostics_record_count": 5
+}

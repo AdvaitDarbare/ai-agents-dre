@@ -4,7 +4,7 @@
 channels:
   slack_general:
     type: slack
-    webhook_env: SLACK_WEBHOOK_URL
+    webhook_env: SLACK_WEBHOOK_URL # set this env var to real Slack Incoming Webhook URL
     description: "General Data Quality Channel"
   
   pagerduty_critical:
@@ -19,11 +19,23 @@ routing:
   BLOCKED:
     channels: [pagerduty_critical, slack_general]
     required_criticality: [HIGH, CRITICAL] # Only page if dataset is high criticality
+    cooldown_minutes: 10
     
   WARNING:
     channels: [slack_general]
     required_criticality: [MEDIUM, HIGH, CRITICAL]
+    cooldown_minutes: 20
 
   # Fallback for low criticality items
   DEFAULT:
     channels: [slack_general]
+    cooldown_minutes: 30
+
+# Optional owner-specific routing overlay.
+# Owner keys are matched case-insensitively.
+owner_routes:
+  "Pipeline QA": [slack_general]
+
+# Noise controls to reduce alert fatigue during active incidents.
+noise_controls:
+  open_incident_warning_cooldown_multiplier: 2

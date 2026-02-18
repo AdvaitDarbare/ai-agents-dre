@@ -1,6 +1,7 @@
-# DataPulse Frontend
+# DataPulse Frontend (Archived Reference)
 
-React dashboard for the Agentic DRE backend.
+Legacy React/Vite dashboard for the Agentic DRE backend.
+Primary UI now lives in `web/` (Next.js).
 
 ## Stack
 
@@ -11,7 +12,7 @@ React dashboard for the Agentic DRE backend.
 - Framer Motion
 - Axios
 
-## Local Development
+## Local Development (Reference Only)
 
 ```bash
 npm install
@@ -56,5 +57,5 @@ npm run preview
 
 ## Notes
 
-- Large bundle warnings are currently expected due monolithic `App.jsx` and chart dependencies.
-- Planned refactor: split `App.jsx` into route/tab-focused modules.
+- This lane is frozen and not the active product surface.
+- Keep it only for historical comparison during migration audits.

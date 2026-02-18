@@ -38,6 +38,8 @@ class ColumnProfile:
     violation_examples: List[dict] = field(default_factory=list)  # List of {type, examples, count}
     quality_score: float = 100.0  # 0-100%
     type: str = "unknown"
+    contract_nullable: Optional[bool] = None
+    null_policy: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -53,7 +55,9 @@ class ColumnProfile:
             "mean_value": round(self.mean_value, 4) if self.mean_value is not None else None,
             "violations": self.violations,
             "violation_examples": self.violation_examples,
-            "quality_score": round(self.quality_score, 2)
+            "quality_score": round(self.quality_score, 2),
+            "contract_nullable": self.contract_nullable,
+            "null_policy": self.null_policy,
         }
 
 
@@ -141,6 +145,16 @@ class DataProfiler:
             columns_spec = contract.get("columns", [])
             quality_config = contract.get("quality", {})
 
+            null_policy_cfg = quality_config.get("null_policy")
+            if not isinstance(null_policy_cfg, dict):
+                null_policy_cfg = {}
+            null_policy = {
+                "enabled": bool(null_policy_cfg.get("enabled", True)),
+                "mode": str(null_policy_cfg.get("mode", "linear")),
+                "warn_threshold": float(null_policy_cfg.get("warn_threshold", 0.01)),
+                "fail_threshold": float(null_policy_cfg.get("fail_threshold", 0.20)),
+            }
+
             # -------------------------------------------------------
             # 1. Per-Column Profiling
             # -------------------------------------------------------
@@ -150,7 +164,9 @@ class DataProfiler:
                     # Column missing from data — already caught by SchemaValidator
                     continue
 
-                profile = self._profile_column(df, col_name, col_spec)
+                enriched_spec = dict(col_spec)
+                enriched_spec["_null_policy"] = null_policy
+                profile = self._profile_column(df, col_name, enriched_spec)
                 report.column_profiles[col_name] = profile
 
         # -------------------------------------------------------
@@ -284,8 +300,25 @@ class DataProfiler:
             null_rate=float(series.isnull().mean()),
             unique_count=int(series.nunique()),
             uniqueness_rate=float(series.nunique() / total) if total > 0 else 0.0,
-            type=str(col_spec.get("data_type", str(series.dtype)))
+            type=str(col_spec.get("data_type", str(series.dtype))),
+            contract_nullable=(col_spec.get("nullable") if "nullable" in col_spec else None),
         )
+
+        policy_cfg = col_spec.get("_null_policy") if isinstance(col_spec, dict) else None
+        policy_cfg = policy_cfg if isinstance(policy_cfg, dict) else {}
+        policy_enabled = bool(policy_cfg.get("enabled", True))
+        policy_mode = str(policy_cfg.get("mode", "linear"))
+        warn_threshold = float(policy_cfg.get("warn_threshold", 0.01))
+        fail_threshold = float(policy_cfg.get("fail_threshold", 0.20))
+        profile.null_policy = {
+            "enabled": policy_enabled,
+            "mode": policy_mode,
+            "warn_threshold": warn_threshold,
+            "fail_threshold": fail_threshold,
+            "penalized": False,
+            "penalty_pct": 0.0,
+            "explanation": "Nulls are permitted by the YAML contract (nullable=true), but completeness scoring penalizes missingness for quality scoring.",
+        }
 
         violations_count = 0
 
@@ -460,7 +493,22 @@ class DataProfiler:
 
         # --- Quality Score ---
         if total > 0:
-            profile.quality_score = max(0.0, ((total - violations_count) / total) * 100)
+            base_score = max(0.0, ((total - violations_count) / total) * 100)
+            penalty_pct = 0.0
+            nullable = col_spec.get("nullable")
+            if policy_enabled and nullable is not False and profile.null_rate > 0:
+                if policy_mode == "threshold":
+                    if profile.null_rate >= fail_threshold:
+                        penalty_pct = 100.0
+                    elif profile.null_rate >= warn_threshold:
+                        penalty_pct = 50.0
+                    else:
+                        penalty_pct = 0.0
+                else:
+                    penalty_pct = float(profile.null_rate) * 100.0
+                profile.null_policy["penalized"] = penalty_pct > 0
+                profile.null_policy["penalty_pct"] = round(float(penalty_pct), 4)
+            profile.quality_score = max(0.0, base_score - penalty_pct)
         else:
             profile.quality_score = 0.0
 

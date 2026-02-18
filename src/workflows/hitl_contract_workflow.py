@@ -14,6 +14,7 @@ from langgraph.types import Command, interrupt
 
 from src.agents.monitor_agent import MonitorAgent
 from src.contracts.store import FileContractStore
+from src.utils.langsmith import build_runnable_config
 
 try:
     from langgraph.checkpoint.postgres import PostgresSaver
@@ -29,8 +30,13 @@ load_dotenv()
 class HITLState(TypedDict, total=False):
     dataset_name: str
     file_path: str
+    source: str
+    apply_file_actions: bool
     pending_file_path: str
     contract_exists: bool
+    verdict: Dict[str, Any]
+    verdict_path: str
+    evaluated_file_path: str
     proposal_yaml: str
     approval_decision: str
     approved_yaml: str
@@ -109,10 +115,16 @@ class HITLContractWorkflow:
 
         return PostgresSaver.from_conn_string(self._to_conn_string())
 
-    def _build_graph(self, checkpointer):
+    def _build_graph(self, checkpointer, *, include_existing_evaluation: bool = False):
         graph = StateGraph(HITLState)
 
         graph.add_node("check_contract", self._node_check_contract)
+        if include_existing_evaluation:
+            # Phase 4: LangGraph spans the entire evaluate flow, not just the contract-missing HITL lane.
+            # Keep stages small so checkpoints can recover between them.
+            graph.add_node("evaluate_pipeline", self._node_evaluate_pipeline)
+            graph.add_node("persist_verdict", self._node_persist_verdict)
+            graph.add_node("apply_file_actions", self._node_apply_file_actions)
         graph.add_node("prepare_pending_and_propose", self._node_prepare_pending_and_propose)
         graph.add_node("wait_for_approval", self._node_wait_for_approval)
         graph.add_node("apply_approved", self._node_apply_approved)
@@ -125,10 +137,14 @@ class HITLContractWorkflow:
             "check_contract",
             self._route_after_contract_check,
             {
-                "existing": "already_configured",
+                "existing": "evaluate_pipeline" if include_existing_evaluation else "already_configured",
                 "missing": "prepare_pending_and_propose",
             },
         )
+        if include_existing_evaluation:
+            graph.add_edge("evaluate_pipeline", "persist_verdict")
+            graph.add_edge("persist_verdict", "apply_file_actions")
+            graph.add_edge("apply_file_actions", END)
         graph.add_edge("prepare_pending_and_propose", "wait_for_approval")
         graph.add_conditional_edges(
             "wait_for_approval",
@@ -167,6 +183,92 @@ class HITLContractWorkflow:
             "quality_score": None,
             "anomaly_summary": {},
             "tool_outputs": [],
+            "error": None,
+        }
+
+    def _node_evaluate_pipeline(self, state: HITLState) -> HITLState:
+        dataset_name = state["dataset_name"]
+        file_path = Path(state["file_path"])
+
+        if not file_path.exists():
+            return {
+                "status": "failed",
+                "error": f"Source file not found: {file_path}",
+                "message": "Could not evaluate dataset because file is missing.",
+                "quality_score": None,
+                "anomaly_summary": {},
+                "tool_outputs": [],
+            }
+
+        verdict = self.agent.evaluate_data_file(file_path=str(file_path), dataset_name=dataset_name)
+
+        quality_score = verdict.get("quality_score")
+        if not isinstance(quality_score, (int, float)):
+            quality_score = verdict.get("profile", {}).get("weighted_quality_score")
+        if not isinstance(quality_score, (int, float)):
+            quality_score = verdict.get("profile", {}).get("overall_quality_score")
+
+        anomaly_count = int(verdict.get("anomaly_count", len(verdict.get("anomalies", [])) or 0) or 0)
+        z_score_max = float(verdict.get("z_score_max", 0.0) or 0.0)
+
+        tool_outputs = verdict.get("tool_outputs")
+        if not isinstance(tool_outputs, list):
+            tool_outputs = []
+
+        return {
+            "status": verdict.get("status", "completed"),
+            "message": verdict.get("reason", "Dataset evaluated."),
+            "verdict": verdict,
+            "quality_score": float(quality_score) if isinstance(quality_score, (int, float)) else None,
+            "anomaly_summary": {
+                "anomaly_count": anomaly_count,
+                "z_score_max": z_score_max,
+            },
+            "tool_outputs": tool_outputs,
+            "error": None,
+        }
+
+    def _node_persist_verdict(self, state: HITLState) -> HITLState:
+        verdict = state.get("verdict")
+        file_path = Path(state["file_path"])
+
+        if not isinstance(verdict, dict):
+            return {
+                "status": state.get("status", "failed"),
+                "error": state.get("error") or "No verdict produced by evaluation stage.",
+                "message": state.get("message") or "Evaluation failed before verdict persistence.",
+            }
+
+        try:
+            verdict_path = file_path.with_suffix(file_path.suffix + ".verdict.json")
+            verdict_path.write_text(json.dumps(verdict, indent=2))
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "error": f"Failed to write verdict file: {exc}",
+                "message": "Evaluation completed but verdict could not be persisted.",
+            }
+
+        return {
+            "verdict_path": str(verdict_path),
+            "error": None,
+        }
+
+    def _node_apply_file_actions(self, state: HITLState) -> HITLState:
+        file_path = Path(state["file_path"])
+        verdict = state.get("verdict") if isinstance(state.get("verdict"), dict) else {}
+        apply_file_actions = bool(state.get("apply_file_actions"))
+
+        final_path = file_path
+
+        if apply_file_actions and verdict.get("status") == "BLOCKED":
+            dest = self.quarantine_dir / file_path.name
+            if file_path.exists() and file_path.resolve() != dest.resolve():
+                shutil.move(str(file_path), str(dest))
+            final_path = dest
+
+        return {
+            "evaluated_file_path": str(final_path),
             "error": None,
         }
 
@@ -391,11 +493,16 @@ class HITLContractWorkflow:
 
     def start_missing_contract(self, dataset_name: str, file_path: str) -> Dict[str, Any]:
         thread_id = self._thread_id(dataset_name)
-        config = {"configurable": {"thread_id": thread_id}}
+        config = build_runnable_config(
+            configurable={"thread_id": thread_id},
+            run_name="hitl_contract_start_missing",
+            tags=["langgraph", "hitl", "contracts", "start"],
+            metadata={"dataset_name": dataset_name, "source": "api", "mode": "missing_contract"},
+        )
 
         with self._open_checkpointer() as checkpointer:
             checkpointer.setup()
-            app = self._build_graph(checkpointer)
+            app = self._build_graph(checkpointer, include_existing_evaluation=False)
             app.invoke(
                 {
                     "dataset_name": dataset_name,
@@ -425,11 +532,16 @@ class HITLContractWorkflow:
         approved_yaml: Optional[str] = None,
     ) -> Dict[str, Any]:
         thread_id = self._thread_id(dataset_name)
-        config = {"configurable": {"thread_id": thread_id}}
+        config = build_runnable_config(
+            configurable={"thread_id": thread_id},
+            run_name="hitl_contract_resume",
+            tags=["langgraph", "hitl", "contracts", "resume"],
+            metadata={"dataset_name": dataset_name, "decision": decision},
+        )
 
         with self._open_checkpointer() as checkpointer:
             checkpointer.setup()
-            app = self._build_graph(checkpointer)
+            app = self._build_graph(checkpointer, include_existing_evaluation=False)
             snapshot = app.get_state(config)
             if not snapshot.interrupts:
                 return {
@@ -462,6 +574,64 @@ class HITLContractWorkflow:
 
         with self._open_checkpointer() as checkpointer:
             checkpointer.setup()
-            app = self._build_graph(checkpointer)
+            app = self._build_graph(checkpointer, include_existing_evaluation=False)
             snapshot = app.get_state(config)
             return bool(snapshot.interrupts)
+
+    def run_for_file(
+        self,
+        dataset_name: str,
+        file_path: str,
+        *,
+        source: str = "api",
+        apply_file_actions: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Unified Phase-4 entrypoint for dataset file handling:
+        - existing contract -> evaluate via graph node
+        - missing contract  -> HITL proposal/interrupt path
+        """
+        thread_id = self._thread_id(dataset_name)
+        config = build_runnable_config(
+            configurable={"thread_id": thread_id},
+            run_name="hitl_contract_run_for_file",
+            tags=["langgraph", "hitl", "contracts", "evaluate"],
+            metadata={
+                "dataset_name": dataset_name,
+                "source": source,
+                "apply_file_actions": bool(apply_file_actions),
+            },
+        )
+
+        with self._open_checkpointer() as checkpointer:
+            checkpointer.setup()
+            app = self._build_graph(checkpointer, include_existing_evaluation=True)
+            app.invoke(
+                {
+                    "dataset_name": dataset_name,
+                    "file_path": file_path,
+                    "source": source,
+                    "apply_file_actions": bool(apply_file_actions),
+                    "status": "running",
+                },
+                config=config,
+            )
+            snapshot = app.get_state(config)
+
+        payload = self._state_payload(snapshot)
+        state = payload["state"]
+        status = state.get("status", "running")
+        mode = "evaluated" if isinstance(state.get("verdict"), dict) else "hitl"
+
+        return {
+            "handled": True,
+            "thread_id": thread_id,
+            "mode": mode,
+            "status": status,
+            "message": state.get("message"),
+            "interrupts": payload["interrupts"],
+            "next": payload["next"],
+            "state": state,
+            "verdict": state.get("verdict"),
+            "evaluated_file_path": state.get("evaluated_file_path"),
+        }

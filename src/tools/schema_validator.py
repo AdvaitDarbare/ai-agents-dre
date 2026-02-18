@@ -181,7 +181,7 @@ class SchemaValidator:
         "VARCHAR": ["varchar", "string", "text", "char"],
         "BOOLEAN": ["boolean", "bool"],
         "DATE": ["date"],
-        "TIMESTAMP": ["timestamp", "datetime"],
+        "TIMESTAMP": ["timestamp", "datetime", "timestamptz", "timestamp with time zone", "timestamp_tz"],
         "TIME": ["time"],
         "INTERVAL": ["interval"],
         "BLOB": ["blob", "binary", "varbinary"],

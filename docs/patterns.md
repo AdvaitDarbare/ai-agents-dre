@@ -58,8 +58,8 @@ import duckdb  # Removed — PostgreSQL only
 
 ### Component Structure
 ```jsx
-// Chart components go in: frontend/src/components/charts/
-// Feature components go in: frontend/src/components/
+// Chart components go in: web/dre/components/charts/
+// Feature components go in: web/dre/components/
 
 // DO: Self-contained components that fetch their own data
 const VolumeAnomalyChart = ({ datasetName }) => {
@@ -111,9 +111,11 @@ const VolumeAnomalyChart = ({ datasetName }) => {
 
 ### API Client
 ```javascript
-// All API functions live in frontend/src/api/index.js
-// DO: Add new endpoints there, import from './api'
-export const getNewThing = (id) => api.get(`/new-thing/${id}`);
+// All backend API functions live in web/lib/dre-api.ts
+// DO: Add new endpoints there, import from '@/lib/dre-api'
+export async function getNewThing(id: string) {
+  return backendGet(`/new-thing/${id}`);
+}
 
 // DON'T: Use raw fetch() or create new axios instances
 ```

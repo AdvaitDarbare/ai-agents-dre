@@ -191,64 +191,52 @@ class DataLandingHandler(FileSystemEventHandler):
             print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'='*70}")
 
-            # Check if contract exists
-            if self.contract_exists(dataset_name):
-                print(f"✅ Contract found: {self.agent.contract_store.path_for(dataset_name)}")
-                print(f"   Running validation...")
+            # Trigger unified workflow entrypoint:
+            # - existing contract -> evaluate
+            # - missing contract  -> propose + pause HITL
+            try:
+                workflow_result = self.hitl_workflow.run_for_file(
+                    dataset_name=dataset_name,
+                    file_path=str(file_path),
+                    source="watcher",
+                    apply_file_actions=False,  # watcher still owns file routing decisions
+                )
+                mode = workflow_result.get("mode")
+                status = workflow_result.get("status")
 
-                # Run validation
-                verdict = self.validate_file(file_path, dataset_name)
-
-                # Handle result
-                self.handle_verdict(file_path, verdict)
-
-            else:
-                print(f"⚠️  No contract found for dataset: {dataset_name}")
-                print(f"   This appears to be a NEW dataset")
-
-                # Check if proposal already exists
-                if self.proposal_exists(dataset_name):
-                    # Additional files while waiting for HITL approval still go to pending.
-                    dest = self.pending_dir / file_path.name
+                if mode == "evaluated":
+                    print(f"✅ Contract found: {self.agent.contract_store.path_for(dataset_name)}")
+                    print("   Running validation...")
+                    verdict = workflow_result.get("verdict") or {}
+                    self.handle_verdict(file_path, verdict)
+                elif status == "paused_hitl":
+                    pending_path = workflow_result.get("state", {}).get("pending_file_path")
+                    if pending_path:
+                        print(f"   📁 Moved to pending approval: {pending_path}")
+                    print(f"\n   🙋 HUMAN ACTION REQUIRED:")
+                    print(f"   1. Open UI: http://localhost:3000")
+                    print(f"   2. Review proposed contract for '{dataset_name}'")
+                    print(f"   3. Edit if needed and approve")
+                    print(f"   4. File will be validated automatically after approval")
+                else:
+                    print(f"   ⚠️ Workflow finished with status: {status}")
+            except Exception as workflow_err:
+                print(f"   ❌ HITL workflow start failed: {workflow_err}")
+                print("   Falling back to legacy proposal generation path.")
+                dest = self.pending_dir / file_path.name
+                if file_path.exists():
                     shutil.move(str(file_path), str(dest))
                     print(f"   📁 Moved to pending approval: {dest}")
-                    print(f"   ℹ️  Contract proposal already exists, waiting for human approval")
+                source_for_generation = dest if dest.exists() else file_path
+                success = self.generate_contract_proposal(dataset_name, source_for_generation)
+                if success:
+                    print(f"\n   🙋 HUMAN ACTION REQUIRED:")
+                    print(f"   1. Open UI: http://localhost:3000")
+                    print(f"   2. Review proposed contract for '{dataset_name}'")
+                    print(f"   3. Edit if needed and approve")
+                    print(f"   4. File will be validated automatically after approval")
                 else:
-                    # Trigger LangGraph HITL workflow (durable interrupt/resume).
-                    try:
-                        workflow_result = self.hitl_workflow.start_missing_contract(
-                            dataset_name=dataset_name,
-                            file_path=str(file_path),
-                        )
-                        status = workflow_result.get("status")
-                        if status == "paused_hitl":
-                            pending_path = workflow_result.get("state", {}).get("pending_file_path")
-                            if pending_path:
-                                print(f"   📁 Moved to pending approval: {pending_path}")
-                            print(f"\n   🙋 HUMAN ACTION REQUIRED:")
-                            print(f"   1. Open UI: http://localhost:5173")
-                            print(f"   2. Review proposed contract for '{dataset_name}'")
-                            print(f"   3. Edit if needed and approve")
-                            print(f"   4. File will be validated automatically after approval")
-                        else:
-                            print(f"   ⚠️ Workflow finished with status: {status}")
-                    except Exception as workflow_err:
-                        print(f"   ❌ HITL workflow start failed: {workflow_err}")
-                        print("   Falling back to legacy proposal generation path.")
-                        dest = self.pending_dir / file_path.name
-                        if file_path.exists():
-                            shutil.move(str(file_path), str(dest))
-                            print(f"   📁 Moved to pending approval: {dest}")
-                        source_for_generation = dest if dest.exists() else file_path
-                        success = self.generate_contract_proposal(dataset_name, source_for_generation)
-                        if success:
-                            print(f"\n   🙋 HUMAN ACTION REQUIRED:")
-                            print(f"   1. Open UI: http://localhost:5173")
-                            print(f"   2. Review proposed contract for '{dataset_name}'")
-                            print(f"   3. Edit if needed and approve")
-                            print(f"   4. File will be validated automatically after approval")
-                        else:
-                            print(f"   ❌ Could not generate proposal - manual contract creation needed")
+                    print(f"   ❌ Could not generate proposal - manual contract creation needed")
 
             print(f"{'='*70}\n")
 

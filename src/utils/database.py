@@ -312,6 +312,177 @@ def init_tables():
                 ON slo_history(run_id)
             """)
 
+            # Async Jobs — background execution status for long-running operations
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS async_jobs (
+                    job_id VARCHAR(64) PRIMARY KEY,
+                    action VARCHAR(64) NOT NULL,
+                    dataset_name VARCHAR(255) NOT NULL,
+                    status VARCHAR(32) NOT NULL,
+                    requested_at TIMESTAMPTZ DEFAULT NOW(),
+                    started_at TIMESTAMPTZ,
+                    finished_at TIMESTAMPTZ,
+                    request_json JSONB DEFAULT '{}'::jsonb,
+                    result_json JSONB,
+                    error_text TEXT
+                )
+            """)
+            cur.execute("""
+                ALTER TABLE async_jobs
+                ADD COLUMN IF NOT EXISTS request_json JSONB DEFAULT '{}'::jsonb
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_async_jobs_requested
+                ON async_jobs(requested_at DESC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_async_jobs_status
+                ON async_jobs(status, requested_at DESC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_async_jobs_dataset
+                ON async_jobs(dataset_name, requested_at DESC)
+            """)
+
+            # Incident lifecycle table (OPEN / ACK / RESOLVED)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS incidents (
+                    incident_id VARCHAR(64) PRIMARY KEY,
+                    run_id VARCHAR(64),
+                    dataset_name VARCHAR(255) NOT NULL,
+                    severity VARCHAR(32) NOT NULL,
+                    status VARCHAR(16) NOT NULL DEFAULT 'OPEN',
+                    owner VARCHAR(255),
+                    title TEXT,
+                    description TEXT,
+                    quality_score DOUBLE PRECISION,
+                    anomaly_count INTEGER DEFAULT 0,
+                    z_score_max DOUBLE PRECISION DEFAULT 0,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    acknowledged_at TIMESTAMPTZ,
+                    resolved_at TIMESTAMPTZ,
+                    metadata JSONB DEFAULT '{}'::jsonb
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_incidents_created
+                ON incidents(created_at DESC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_incidents_status
+                ON incidents(status, created_at DESC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_incidents_dataset
+                ON incidents(dataset_name, status, created_at DESC)
+            """)
+
+            # Diagnostics Warehouse — failed records and check-level context for faster triage.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS diagnostics_records (
+                    id BIGSERIAL PRIMARY KEY,
+                    run_id VARCHAR(64),
+                    dataset_name VARCHAR(255) NOT NULL,
+                    column_name VARCHAR(255),
+                    check_type VARCHAR(128) NOT NULL,
+                    severity VARCHAR(32) NOT NULL DEFAULT 'info',
+                    violation_count INTEGER DEFAULT 0,
+                    sample_records JSONB DEFAULT '[]'::jsonb,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_diagnostics_dataset
+                ON diagnostics_records(dataset_name, created_at DESC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_diagnostics_run
+                ON diagnostics_records(run_id, created_at DESC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_diagnostics_check
+                ON diagnostics_records(check_type, created_at DESC)
+            """)
+
+            # Action Audit Log — structured operator/agent actions (for ops + UI timelines)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS action_audit_log (
+                    id VARCHAR(64) PRIMARY KEY,
+                    timestamp TIMESTAMPTZ DEFAULT NOW(),
+                    actor VARCHAR(255),
+                    source VARCHAR(64),
+                    action VARCHAR(64) NOT NULL,
+                    dataset_name VARCHAR(255),
+                    status VARCHAR(32),
+                    metadata JSONB DEFAULT '{}'::jsonb
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_action_audit_ts
+                ON action_audit_log(timestamp DESC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_action_audit_dataset
+                ON action_audit_log(dataset_name, timestamp DESC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_action_audit_action
+                ON action_audit_log(action, timestamp DESC)
+            """)
+
+            # Agentic auto-remediation run-level state
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS agentic_remediation_runs (
+                    id VARCHAR(64) PRIMARY KEY,
+                    dataset_name VARCHAR(255) NOT NULL,
+                    initial_run_id VARCHAR(64),
+                    final_run_id VARCHAR(64),
+                    status VARCHAR(32) NOT NULL,
+                    attempt_count INTEGER DEFAULT 0,
+                    policy_blocks INTEGER DEFAULT 0,
+                    summary JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agentic_runs_dataset
+                ON agentic_remediation_runs(dataset_name, created_at DESC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agentic_runs_status
+                ON agentic_remediation_runs(status, created_at DESC)
+            """)
+
+            # Agentic auto-remediation attempt-level trace
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS agentic_remediation_attempts (
+                    id BIGSERIAL PRIMARY KEY,
+                    remediation_run_id VARCHAR(64) NOT NULL,
+                    attempt_no INTEGER NOT NULL,
+                    input_run_id VARCHAR(64),
+                    classification VARCHAR(64),
+                    proposed_diff_summary TEXT,
+                    confidence DOUBLE PRECISION,
+                    applied BOOLEAN DEFAULT FALSE,
+                    output_run_id VARCHAR(64),
+                    result_status VARCHAR(32),
+                    error TEXT,
+                    details JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agentic_attempts_run
+                ON agentic_remediation_attempts(remediation_run_id, attempt_no ASC)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agentic_attempts_dataset_run
+                ON agentic_remediation_attempts(input_run_id, output_run_id)
+            """)
+
     print("✅ PostgreSQL tables initialized")
 
 

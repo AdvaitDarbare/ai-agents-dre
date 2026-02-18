@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { FileText, Clock, Edit3, MessageSquare, Upload, Save, X, Check, Loader2, AlertCircle } from "lucide-react";
 import axios from "axios";
+import { API_BASE_URL } from "../api";
 import { Light as SyntaxHighlighter } from "react-syntax-highlighter";
 import yaml from "react-syntax-highlighter/dist/esm/languages/hljs/yaml";
 import { atomOneLight } from "react-syntax-highlighter/dist/esm/styles/hljs";
@@ -19,6 +20,7 @@ const ContractGovernance = ({ datasetName }) => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [isAiGenerated, setIsAiGenerated] = useState(false);
+  const apiBase = API_BASE_URL || "http://localhost:8000";
 
   useEffect(() => {
     fetchVersionHistory();
@@ -27,21 +29,30 @@ const ContractGovernance = ({ datasetName }) => {
 
   const fetchVersionHistory = async () => {
     try {
-      const response = await axios.get(`http://localhost:8000/contract-history/${datasetName}`);
-      setVersions(response.data || []);
+      const response = await axios.get(`${apiBase}/contract-history/${encodeURIComponent(datasetName)}`);
+      const items = response.data || [];
+      setVersions(items);
+      if (!selectedVersion && items.length > 0) {
+        setSelectedVersion(items[0]);
+      }
+      return items;
     } catch (err) {
       console.error("Failed to load version history", err);
+      setVersions([]);
+      return [];
     }
   };
 
   const fetchCurrentContract = async () => {
     setLoading(true);
     try {
-      const response = await axios.get(`http://localhost:8000/contract/${datasetName}`);
+      const response = await axios.get(`${apiBase}/contract/${encodeURIComponent(datasetName)}`);
       setCurrentContract(response.data.yaml_content || "");
       setEditedContract(response.data.yaml_content || "");
     } catch (err) {
       console.error("Failed to load current contract", err);
+      setCurrentContract("");
+      setEditedContract("");
     } finally {
       setLoading(false);
     }
@@ -50,7 +61,7 @@ const ContractGovernance = ({ datasetName }) => {
   const handleSaveContract = async () => {
     setSaving(true);
     try {
-      await axios.post(`http://localhost:8000/contract/${datasetName}`, {
+      const response = await axios.post(`${apiBase}/contract/${encodeURIComponent(datasetName)}`, {
         yaml_content: editedContract,
         change_type: isAiGenerated ? "ai_generated" : "manual_edit",
         changed_by: isAiGenerated ? "AI Assistant" : "user"
@@ -58,7 +69,17 @@ const ContractGovernance = ({ datasetName }) => {
       setCurrentContract(editedContract);
       setIsEditing(false);
       setIsAiGenerated(false); // Reset flag after saving
-      fetchVersionHistory();
+      const latest = await fetchVersionHistory();
+      if (latest.length > 0) {
+        setSelectedVersion(latest[0]);
+      }
+      if (response?.data?.scan?.enqueued) {
+        alert(`Contract version saved. Auto-scan queued (${response.data.scan.job_id}).`);
+      } else if (response?.data?.scan?.error) {
+        alert(`Contract version saved. Auto-scan could not start: ${response.data.scan.error}`);
+      } else {
+        alert("Contract version saved.");
+      }
     } catch (err) {
       console.error("Failed to save contract", err);
       alert("Failed to save contract: " + (err.response?.data?.detail || err.message));
@@ -69,12 +90,22 @@ const ContractGovernance = ({ datasetName }) => {
 
   const handleLoadVersion = async (version) => {
     try {
-      const response = await axios.get(`http://localhost:8000/contract/${datasetName}/version/${version.version_id}`);
-      setCurrentContract(response.data.yaml_content);
+      const response = await axios.get(
+        `${apiBase}/contract/${encodeURIComponent(datasetName)}/version/${encodeURIComponent(version.version_id)}`,
+      );
       setEditedContract(response.data.yaml_content);
       setSelectedVersion(version);
+      setIsEditing(true);
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          role: "system",
+          content: `Loaded version ${version.version_id}. Review and click Save Contract to restore as active.`,
+        },
+      ]);
     } catch (err) {
       console.error("Failed to load version", err);
+      alert("Failed to load selected version: " + (err.response?.data?.detail || err.message));
     }
   };
 
@@ -88,9 +119,9 @@ const ContractGovernance = ({ datasetName }) => {
 
     try {
       // Call AI modification endpoint
-      const response = await axios.post(`http://localhost:8000/contract/${datasetName}/ai-modify`, {
+      const response = await axios.post(`${apiBase}/contract/${encodeURIComponent(datasetName)}/ai-modify`, {
         instruction: chatMessage,
-        current_yaml: currentContract
+        current_yaml: editedContract || currentContract
       });
 
       const aiMessage = {

@@ -76,6 +76,11 @@ def merge_contracts(current_yaml: str, observed_yaml: str) -> Tuple[str, Dict[st
                         # Optional: log specific value updates if needed, for now just silent update
                         pass 
                     current_col[stat_field] = observed_col[stat_field]
+            elif stat_field in current_col and _is_inferred_column(current_col):
+                # Prevent stale auto-generated constraints from lingering forever.
+                # Human-authored contracts can still keep these fields by using non-inferred descriptions.
+                del current_col[stat_field]
+                summary["filled_fields"].append({"column": current_col.get("name"), "field": f"removed_{stat_field}"})
 
         # Fill missing governance fields from observed (only if missing in current)
         _fill_missing_governance_fields(current_col, observed_col, summary)
@@ -117,3 +122,8 @@ def _normalize_type(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip().lower()
+
+
+def _is_inferred_column(column: Dict[str, Any]) -> bool:
+    desc = str(column.get("description") or "").lower()
+    return "inferred from" in desc or "imported from observed schema" in desc

@@ -1,0 +1,50 @@
+kind: DataContract
+apiVersion: v3.1.0
+id: my-data-contract
+info:
+  title: My Data Contract
+  version: 1.0.0
+  description: Generated model of data/landing/tips.csv
+  owner: Unknown
+  domain: Unknown
+table_name: tips
+description: Generated model of data/landing/tips.csv
+quality:
+  min_rows: 1
+  anomaly_thresholds:
+    z_score_warning: 2.5
+    z_score_critical: 3.0
+    quality_score_warn: 80
+    quality_score_block: 50
+  slos:
+    min_quality_score: 80
+    max_anomaly_count: 0
+columns:
+- name: total_bill
+  data_type: double
+  nullable: true
+  description: Imported from tips.csv
+- name: tip
+  data_type: double
+  nullable: true
+  description: Imported from tips.csv
+- name: sex
+  data_type: varchar
+  nullable: true
+  description: Imported from tips.csv
+- name: smoker
+  data_type: boolean
+  nullable: true
+  description: Imported from tips.csv
+- name: day
+  data_type: varchar
+  nullable: true
+  description: Imported from tips.csv
+- name: time
+  data_type: varchar
+  nullable: true
+  description: Imported from tips.csv
+- name: size
+  data_type: integer
+  nullable: true
+  description: Imported from tips.csv

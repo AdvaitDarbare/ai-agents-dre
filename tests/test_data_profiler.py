@@ -8,6 +8,8 @@ import pandas as pd
 from pathlib import Path
 import tempfile
 import shutil
+import textwrap
+
 from src.tools.data_profiler import DataProfiler
 
 
@@ -278,6 +280,36 @@ class TestDataProfiler(unittest.TestCase):
         has_min_error = any('min value' in err and 'amount' in err for err in errors)
         has_max_error = any('max value' in err and 'amount' in err for err in errors)
         self.assertTrue(has_min_error or has_max_error, "Expected range error")
+
+    def test_nullable_column_nulls_reduce_quality_score(self):
+        contract = textwrap.dedent(
+            """
+            kind: DataContract
+            apiVersion: v3.1.0
+            id: nullable-null-policy
+            table_name: nullable_policy
+            quality:
+              null_policy:
+                enabled: true
+                mode: linear
+            columns:
+            - name: a
+              data_type: integer
+              nullable: true
+            """
+        ).strip()
+
+        contract_path = self.temp_dir / "nullable_policy.yaml"
+        contract_path.write_text(contract)
+
+        df = pd.DataFrame({"a": [1, None, None, 4]})
+        report = self.profiler.profile(df, contract_path, dataset_name="nullable_policy")
+        col = report.column_profiles["a"]
+
+        self.assertAlmostEqual(col.null_rate, 0.5)
+        self.assertTrue(isinstance(col.null_policy, dict) and col.null_policy.get("enabled") is True)
+        self.assertTrue(col.null_policy.get("penalized"))
+        self.assertLess(col.quality_score, 100.0)
 
 
 if __name__ == '__main__':

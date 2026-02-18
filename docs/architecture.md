@@ -1,5 +1,7 @@
 # Architecture
 
+Last updated: 2026-02-18
+
 ## System Overview
 
 ```text
@@ -9,95 +11,87 @@ Data File (CSV/Parquet/JSON)
 File Watcher / API Trigger
       |
       v
-MonitorAgent.evaluate_data_file()
+Reliability Service / LangGraph HITL Workflow / Async Job Worker
       |
-      +--> Stage A   SchemaValidator (hard gate)
-      +--> Stage A2  DataProfiler (value-level quality)
-      +--> Stage A3  DimensionScorer (6D weighted score)
-      +--> Stage B   AnomalyDetector (z-score + robust z + IQR)
-      +--> Stage C   Load / Quarantine decision
-      +--> Stage D   Persist run + metrics + baselines + SLO checks
-      +--> Stage E   LLM explanation/advice (Agno)
+      +--> Unified dispatch (`run_for_file`)
+      |      - contract exists: staged evaluate graph
+      |          * `evaluate_pipeline` (MonitorAgent pipeline execution)
+      |          * `persist_verdict` (writes `.verdict.json`)
+      |          * `apply_file_actions` (optional quarantine routing)
+      |      - contract missing: proposal + HITL interrupt/resume
+      |
+      +--> Contract missing: durable HITL state in PostgreSQL checkpoint (PostgresSaver)
+      |
+      +--> Contract exists: MonitorAgent.evaluate_data_file()
+              |
+              +--> Stage A   SchemaValidator (Pydantic/DuckDB alignment)
+              +--> Stage A2  DataProfiler (In-memory aggregate metrics)
+              +--> Stage A3  DimensionScorer (6D weighted quality framework)
+              +--> Stage B   AnomalyDetector (Multi-detector: z-score, robust MAD, IQR)
+              +--> Stage C   Forced Load / Automated Routing decision
+              +--> Stage D   Persist outcomes (History, Metrics, Baselines, SLOs)
+              +--> Stage E   LLM explanation/advice (Agno + OpenAI)
+      |
+      +--> Backtesting harness (`/backtesting/{dataset}`) for FP/FN tuning & precision recall
 ```
 
 ## Core Runtime Components
 
-- `src/api.py`: FastAPI API surface
-- `src/agents/monitor_agent.py`: orchestrator
-- `src/runners/file_watcher.py`: event-driven ingest watcher
-- `src/contracts/store.py`: contract store abstraction (file-backed)
-- `src/tools/*`: validators, profiler, anomaly engine, lineage, remediation
-- `src/utils/database.py`: PostgreSQL pool + schema init
+- **API Layer (`src/api.py`)**: FastAPI application serving the Next.js dashboard and external integrations.
+- **Service Layer (`src/services/`)**:
+    - `ReliabilityService`: The primary business logic orchestrator.
+    - `AsyncJobService`: PostgreSQL-backed state machine for background tasks (QUEUED -> CLAIMED -> COMPLETED/FAILED). Supports in-process threading or distributed workers via `ASYNC_JOB_EXECUTION_MODE`.
+    - `IncidentService`: Manages lifecycle events (`OPEN`, `ACK`, `RESOLVED`) and alerting.
+    - `PolicyService`: Evaluates safety rules for destructive actions (e.g., deleting a "CRITICAL" dataset requires explicit human approval).
+    - `ActionAuditService`: SQL-backed immutable log for every system or human action.
+- **Agentic Core (`src/agents/monitor_agent.py`)**: High-level orchestrator that manages the transition between deterministic stages and AI-driven reasoning.
+- **Workflow Runtimes (`src/workflows/`)**:
+    - `HITLContractWorkflow`: LangGraph workflow managing the "Missing Contract" state with durable checkpoints.
+    - `AgenticReliabilityWorkflow`: Investigates data failures and proposes remediation plans.
+- **Tools Engine (`src/tools/`)**:
+    - `DimensionScorer`: Implements a 6-dimensional quality model (Reliability, Completeness, etc.) with configurable weights.
+    - `AnomalyDetector`: Statistical engine for seasonality-aware drift detection.
+    - `ImpactAnalyzer`: Builds a dependency graph from `lineage.yaml` to assess downstream risk.
 
-## Contract Lifecycle Model
+## Decisioning & Quality Gates
 
-### Path 1: Contract-first (preferred)
+### Quality Gates (Stage C)
+The platform evaluates the final `verdict` based on:
+1. **Schema Consistency**: Hard block if mandatory columns are missing or types are incompatible.
+2. **Dimension Scores**: Calculated against the 6D framework.
+3. **Anomaly Counts**: Aggregated z-score violations.
 
-1. Dataset contract exists in `config/expectations`
-2. New file arrives
-3. Auto-validation runs
-4. Verdict persisted and surfaced in UI
+**Manual Force Load**:
+Operators can manually override a `BLOCKED` or `WARNING` status using the `force_load` flag.
+- **Behavior**: Bypasses Stage C load block and forces ingestion into Doris.
+- **Auditing**: Prefixes the verdict reason with `FORCE LOAD:` and records the action in the `action_audit` table.
 
-### Path 2: Observation + HITL fallback
+### Anomaly Detection Logic
+The detector uses three concurrent models to reduce false positives:
+- **Z-Score**: Best for normal distributions.
+- **Robust MAD**: Resilient to outliers (Median Absolute Deviation).
+- **IQR (Inter-Quartile Range)**: Effective for non-parametric data.
 
-1. New file arrives with no approved contract
-2. File moved to `data/pending_approval`
-3. Proposal YAML generated in `config/proposals`
-4. Human approves/rejects in UI/API
-5. On approval: contract saved and pending files validated automatically
+## Data Persistence Strategy
 
-## Data Persistence Model
+- **PostgreSQL 16**: The source of truth for all operational state.
+    - `run_history`: Summarized run outcomes.
+    - `metric_history`: JSONB time-series of every profile metric.
+    - `learned_thresholds`: Rolling baselines for anomaly detection.
+    - `async_jobs`: Durable queue status.
+- **DuckDB**: Used for fast, zero-copy profiling of CSV/Parquet/JSON files in memory before persistence.
+- **File System**: `config/expectations` holds the YAML contracts (Data Contract standard).
 
-PostgreSQL stores:
+## Tech Stack Summary
 
-- run outcomes (`run_history`)
-- metric time-series (`metric_history`)
-- learned baselines (`learned_thresholds`)
-- SLO checks (`slo_history`)
-- dataset registry (`dataset_registry`)
-- governance and remediation history
+- **Backend**: Python 3.12, FastAPI, Pydantic v2.
+- **AI/LLM**: Agno Framework, OpenAI (GPT-4o), LangGraph (Orchestration).
+- **Data Engine**: DuckDB, Pandas, PyMySQL (Doris Load).
+- **Frontend**: Next.js 15, Tailwind CSS, Lucide Icons, Shadcn-like component architecture (Vanilla CSS/Tailwind mixed).
+- **Observability**: SLACK webhooks, LangSmith tracing, structured JSON logging.
 
-DuckDB is used in-memory for profiling/validation workflows only.
+## Related Docs
 
-## Decisioning
-
-### Quality gates
-
-- Schema-breaking issues: `BLOCKED`
-- Weighted quality score thresholds:
-  - below block threshold -> `BLOCKED`
-  - below warning threshold -> `WARNING`
-
-### Anomaly gates
-
-- Metrics compared against learned baselines
-- Detectors: z-score, robust z-score (MAD), IQR bounds
-- Impact criticality influences final severity handling
-
-### SLO checks
-
-Per-run SLO checks include:
-
-- availability
-- minimum quality score
-- maximum anomaly count
-- freshness SLA (if configured)
-
-## Frontend View Model
-
-`frontend/src/App.jsx` consumes API endpoints and renders:
-
-- Health pulse table
-- Dataset cards (active + pending/unconfigured)
-- Expanded row detail tabs
-  - Data Quality
-  - Anomalies & Violations
-  - SLOs & Budget
-  - Governance & History
-  - Impact Lineage
-
-## Current Constraints
-
-- Single-process orchestrator (no async job queue yet)
-- Monolithic frontend app file (planned extraction)
-- Contract source-of-truth is local filesystem (Git-backed contract store is future path)
+- `docs/api.md`: Request/Response reference.
+- `docs/database.md`: Schema definitions.
+- `docs/connectors.md`: Source ingestion guide.

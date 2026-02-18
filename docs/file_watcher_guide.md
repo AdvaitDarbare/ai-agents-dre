@@ -154,7 +154,7 @@ Time: 2026-02-15 14:35:22
    ✅ Proposal saved to config/proposals/customers.yaml
 
    🙋 HUMAN ACTION REQUIRED:
-   1. Open UI: http://localhost:5173
+   1. Open UI: http://localhost:3000
    2. Review proposed contract for 'customers'
    3. Edit if needed and approve
    4. File will be validated automatically after approval

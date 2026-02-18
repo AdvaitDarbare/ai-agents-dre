@@ -52,11 +52,14 @@ import {
 } from "recharts";
 import {
   getPulse,
-  evaluateDataset,
+  enqueueEvaluateDataset,
+  enqueueBulkEvaluateDatasets,
+  getJobStatus,
   getDatasets,
   getLineage,
   getSystemHealth,
   getDatasetProfile,
+  getDatasetData,
   getRemediationPlan,
   getRecentRuns,
   getGlobalStats,
@@ -76,6 +79,8 @@ import {
   getSloSummary,
   getPendingContracts,
   deleteDataset,
+  aiModifyContract,
+  chatWithAssistant,
 } from "./api";
 
 // Chart Components
@@ -541,8 +546,8 @@ const ContractWizardModal = ({ isOpen, onClose, datasetName, dataset, onSave }) 
 
       // Step 1: Fetch Profile & Sample
       Promise.all([
-        import("./api").then((api) => api.getDatasetProfile(datasetName)),
-        import("./api").then((api) => api.getDatasetData(datasetName, 5)),
+        getDatasetProfile(datasetName),
+        getDatasetData(datasetName, 5),
       ])
         .then(([profileRes, sampleRes]) => {
           setProfileData(profileRes.data);
@@ -561,10 +566,14 @@ const ContractWizardModal = ({ isOpen, onClose, datasetName, dataset, onSave }) 
     setStep(2);
     setLoading(true);
     try {
-      const api = await import("./api");
-      const res = await api.proposeContract(datasetName);
+      const res = await proposeContract(datasetName);
       setProposedYaml(res.data.proposed_yaml);
       setAiAnalysis(res.data.generation);
+      if (res?.data?.scan?.enqueued && res?.data?.scan?.job_id) {
+        alert(`Initial run queued automatically (${res.data.scan.job_id}).`);
+      } else if (res?.data?.scan?.error) {
+        alert(`Proposal generated, but auto-run could not start: ${res.data.scan.error}`);
+      }
       setLoading(false);
     } catch (err) {
       setError("Failed to generate contract proposal.");
@@ -597,16 +606,14 @@ const ContractWizardModal = ({ isOpen, onClose, datasetName, dataset, onSave }) 
     setAssistantLoading(true);
 
     try {
-      const api = await import("./api");
-
       // Check for modification intent
       if (userMessage.toLowerCase().includes('modify') ||
           userMessage.toLowerCase().includes('add') ||
           userMessage.toLowerCase().includes('change') ||
           userMessage.toLowerCase().includes('update') ||
           userMessage.toLowerCase().includes('make')) {
-        const result = await api.aiModifyContract(datasetName, userMessage);
-        setProposedYaml(result.contract_yaml);
+        const result = await aiModifyContract(datasetName, userMessage, proposedYaml);
+        setProposedYaml(result.modified_yaml || proposedYaml);
         setAssistantMessages(prev => [...prev, {
           role: 'assistant',
           content: `✓ Contract updated! I've applied your changes. The YAML editor on the left now reflects the modifications. Anything else?`
@@ -614,7 +621,7 @@ const ContractWizardModal = ({ isOpen, onClose, datasetName, dataset, onSave }) 
       }
       // General explanation/chat
       else {
-        const result = await api.chatWithAssistant(userMessage, { dataset: datasetName, contract: proposedYaml });
+        const result = await chatWithAssistant(userMessage, { dataset: datasetName, contract: proposedYaml });
         setAssistantMessages(prev => [...prev, {
           role: 'assistant',
           content: result.response || result.message || 'I processed your request.'
@@ -1344,18 +1351,16 @@ const DataPreviewModal = ({ isOpen, onClose, datasetName }) => {
   useEffect(() => {
     if (isOpen && datasetName) {
       setLoading(true);
-      import("./api").then((api) => {
-        api.getDatasetData(datasetName)
-          .then((res) => {
-            setData(res.data);
-            setLoading(false);
-          })
-          .catch((err) => {
-            console.error("Failed to load data", err);
-            setError("Failed to load dataset preview.");
-            setLoading(false);
-          });
-      });
+      getDatasetData(datasetName)
+        .then((res) => {
+          setData(res.data);
+          setLoading(false);
+        })
+        .catch((err) => {
+          console.error("Failed to load data", err);
+          setError("Failed to load dataset preview.");
+          setLoading(false);
+        });
     } else {
       setData(null);
       setError(null);
@@ -2345,6 +2350,8 @@ const App = () => {
   const [scanningDatasets, setScanningDatasets] = useState(new Set());
   const [deletingDatasets, setDeletingDatasets] = useState(new Set());
   const [previewDataset, setPreviewDataset] = useState(null);
+  const [postScanInsights, setPostScanInsights] = useState(null);
+  const [postScanLoading, setPostScanLoading] = useState(false);
 
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const saved = localStorage.getItem("theme");
@@ -2452,22 +2459,16 @@ const App = () => {
 
   const handleProposeSave = async (data) => {
     try {
-      await saveContract(data); // Assuming saveContract is imported or we use endpoint
-      // Actually we need to call the API directly or use a wrapper.
-      // Let's use the API function directly if imported, or fetch.
-      // We need to import saveContract first.
-      // Wait, let's just implement the fetch here to be safe or assuming onSave does it in the modal?
-      // The modal calls onSave. We need to pass a handler that calls the API.
+      const response = await saveContract(data);
+      const scan = response?.data?.scan || {};
 
-      const response = await fetch("http://localhost:8000/contracts/save", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-      });
-      if (!response.ok) throw new Error("Failed to save");
-
-      alert("Contract saved successfully! Re-scanning...");
-      handleRunCheck(data.dataset_name);
+      if (scan.enqueued && scan.job_id) {
+        alert(`Contract saved successfully. Auto-scan queued (${scan.job_id}).`);
+      } else if (scan.error) {
+        alert(`Contract saved successfully, but auto-scan could not start: ${scan.error}`);
+      } else {
+        alert("Contract saved successfully.");
+      }
     } catch (err) {
       console.error("Failed to save contract", err);
       alert("Failed to save: " + err.message);
@@ -2483,7 +2484,16 @@ const App = () => {
       setIsProfileOpen(true);
     } catch (err) {
       console.error("Failed to get profile", err);
-      alert("Failed to fetch profile data. Ensure dataset file exists.");
+      const apiDetail = err?.response?.data?.detail;
+      const message = String(apiDetail || err?.message || "");
+      if (
+        message.toLowerCase().includes("generate/approve yaml first") ||
+        (message.toLowerCase().includes("409") && message.toLowerCase().includes("contract approval"))
+      ) {
+        alert("Generate/approve YAML first. Deep profile is available only after contract approval or first completed scan.");
+      } else {
+        alert("Failed to fetch profile data. Ensure dataset file exists.");
+      }
     }
   };
 
@@ -2496,13 +2506,92 @@ const App = () => {
     }
   };
 
+  const pollAsyncJob = async (jobId, timeoutMs = 180000, intervalMs = 1200) => {
+    if (!jobId) throw new Error("Missing job id for scan.");
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      const res = await getJobStatus(jobId);
+      const job = res.data;
+      if (job?.status === "COMPLETED") return job;
+      if (job?.status === "FAILED") {
+        throw new Error(job?.error || "Scan job failed.");
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+
+    throw new Error("Scan is still running. It exceeded the UI wait window.");
+  };
+
+  const hydratePostScanInsights = async (datasetName) => {
+    setPostScanLoading(true);
+    try {
+      const [profileRes, previewRes] = await Promise.all([
+        getDatasetProfile(datasetName),
+        getDatasetData(datasetName, 15),
+      ]);
+      const profile = profileRes?.data || {};
+      const preview = previewRes?.data || {};
+
+      const contractViolations = Array.isArray(profile?.constraint_violations)
+        ? profile.constraint_violations.map((item) => ({
+          type: item?.type || "CONSTRAINT",
+          message: item?.message || "Constraint violation",
+          column: item?.column || null,
+        }))
+        : [];
+
+      const columnViolations = Object.entries(profile?.column_profiles || {}).flatMap(([column, info]) =>
+        Array.isArray(info?.violations)
+          ? info.violations.map((message) => ({
+            type: "COLUMN_RULE",
+            message: String(message),
+            column,
+          }))
+          : [],
+      );
+
+      setPostScanInsights({
+        datasetName,
+        capturedAt: new Date().toISOString(),
+        qualityScore:
+          typeof profile?.overall_quality_score === "number"
+            ? profile.overall_quality_score
+            : null,
+        totalRows:
+          typeof preview?.total_rows === "number"
+            ? preview.total_rows
+            : null,
+        violations: [...contractViolations, ...columnViolations],
+        previewColumns: Array.isArray(preview?.columns) ? preview.columns : [],
+        previewRows: Array.isArray(preview?.data) ? preview.data : [],
+      });
+    } catch (err) {
+      console.error("Failed to hydrate post-scan insights", err);
+      setPostScanInsights({
+        datasetName,
+        capturedAt: new Date().toISOString(),
+        qualityScore: null,
+        totalRows: null,
+        violations: [],
+        previewColumns: [],
+        previewRows: [],
+        error: err?.message || "Unable to load post-scan insights.",
+      });
+    } finally {
+      setPostScanLoading(false);
+    }
+  };
+
   const handleRunCheck = async (name) => {
     setScanningDatasets((prev) => new Set(prev).add(name));
     try {
-      await evaluateDataset(name);
-      await fetchPulse();
+      const queued = await enqueueEvaluateDataset(name);
+      await pollAsyncJob(queued?.data?.job_id);
+      await Promise.all([fetchPulse(), fetchPendingContracts(), hydratePostScanInsights(name)]);
     } catch (err) {
       console.error("Evaluation failed", err);
+      alert(`Scan failed for ${name}: ${err.message}`);
     } finally {
       setScanningDatasets((prev) => {
         const next = new Set(prev);
@@ -2526,6 +2615,43 @@ const App = () => {
       }
       await Promise.all([fetchInitialData(), fetchPendingContracts()]);
     } catch (err) {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail;
+      const policyMessage = String(detail?.message || '');
+      const needsPolicyApproval = status === 409 && policyMessage.toLowerCase().includes('policy approval required');
+
+      if (needsPolicyApproval) {
+        const approved = window.confirm(
+          `This delete requires policy approval for a HIGH/CRITICAL dataset.\n\nDataset: ${datasetName}\n\nProceed with explicit approval?`,
+        );
+        if (!approved) return;
+
+        const reason = window.prompt(
+          "Enter policy approval reason (required):",
+          "Manual deletion approved by owner for test cleanup",
+        );
+        if (!reason || !String(reason).trim()) {
+          alert("Delete cancelled: policy reason is required.");
+          return;
+        }
+
+        try {
+          await deleteDataset(datasetName, {
+            policyApproved: true,
+            policyReason: String(reason).trim(),
+          });
+          if (previewDataset === datasetName) {
+            setPreviewDataset(null);
+          }
+          await Promise.all([fetchInitialData(), fetchPendingContracts()]);
+          return;
+        } catch (retryErr) {
+          console.error("Dataset deletion failed after policy approval", retryErr);
+          alert(`Failed to delete dataset: ${retryErr?.message || "unknown error"}`);
+          return;
+        }
+      }
+
       console.error("Dataset deletion failed", err);
       alert(`Failed to delete dataset: ${err.message}`);
     } finally {
@@ -2540,10 +2666,10 @@ const App = () => {
   const handleSmartScan = async () => {
     setLoading(true);
     try {
-      // Run checks for all datasets
-      // In a real production app, this should be a single backend async job
-      const promises = allDatasets.map((ds) => evaluateDataset(ds.name));
-      await Promise.all(promises);
+      const datasetNames = allDatasets.map((ds) => ds.name).filter(Boolean);
+      if (!datasetNames.length) return;
+      const queued = await enqueueBulkEvaluateDatasets(datasetNames);
+      await pollAsyncJob(queued?.data?.job_id, 300000, 1500);
       await fetchPulse();
     } catch (err) {
       console.error("Smart Scan failed", err);
@@ -3079,6 +3205,143 @@ const App = () => {
                     </tbody>
                   </table>
                 </div>
+              </div>
+
+              <div className="bg-card rounded-3xl border border-border shadow-soft overflow-hidden">
+                <div className="px-8 py-6 border-b border-border bg-muted/30 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-primary/10 rounded-lg">
+                      <AlertTriangle size={20} className="text-primary" />
+                    </div>
+                    <div>
+                      <h3 className="font-extrabold text-lg tracking-tight text-foreground">
+                        Post-Scan Violations & Data Preview
+                      </h3>
+                      <p className="text-xs font-semibold text-muted-foreground">
+                        Structured insights from the latest completed scan.
+                      </p>
+                    </div>
+                  </div>
+                  {postScanLoading && (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground font-semibold">
+                      <Loader2 size={14} className="animate-spin" />
+                      Refreshing insights...
+                    </div>
+                  )}
+                </div>
+
+                {!postScanInsights ? (
+                  <div className="px-8 py-10 text-sm text-muted-foreground">
+                    Run a dataset scan to populate violation details and data preview.
+                  </div>
+                ) : (
+                  <div className="p-8 space-y-6">
+                    <div className="flex flex-wrap gap-3 text-xs font-semibold">
+                      <span className="px-3 py-1 rounded-md bg-muted text-muted-foreground">
+                        Dataset: {postScanInsights.datasetName}
+                      </span>
+                      <span className="px-3 py-1 rounded-md bg-muted text-muted-foreground">
+                        Captured: {new Date(postScanInsights.capturedAt).toLocaleString()}
+                      </span>
+                      <span className="px-3 py-1 rounded-md bg-muted text-muted-foreground">
+                        Quality: {typeof postScanInsights.qualityScore === "number" ? `${postScanInsights.qualityScore.toFixed(1)}%` : "N/A"}
+                      </span>
+                      <span className="px-3 py-1 rounded-md bg-muted text-muted-foreground">
+                        Rows: {typeof postScanInsights.totalRows === "number" ? postScanInsights.totalRows.toLocaleString() : "N/A"}
+                      </span>
+                    </div>
+
+                    {postScanInsights.error && (
+                      <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                        {postScanInsights.error}
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                      <div className="rounded-2xl border border-border overflow-hidden">
+                        <div className="px-4 py-3 bg-muted/40 border-b border-border flex items-center justify-between">
+                          <span className="text-xs font-black uppercase tracking-[0.12em] text-muted-foreground">
+                            Violations
+                          </span>
+                          <span className="text-xs font-semibold text-muted-foreground">
+                            {postScanInsights.violations.length}
+                          </span>
+                        </div>
+                        <div className="max-h-72 overflow-auto custom-scrollbar">
+                          {postScanInsights.violations.length === 0 ? (
+                            <div className="px-4 py-6 text-sm text-muted-foreground">
+                              No violations detected in the latest scan.
+                            </div>
+                          ) : (
+                            <table className="w-full text-left text-sm">
+                              <thead className="sticky top-0 bg-card">
+                                <tr className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+                                  <th className="px-4 py-2 border-b border-border">Type</th>
+                                  <th className="px-4 py-2 border-b border-border">Column</th>
+                                  <th className="px-4 py-2 border-b border-border">Message</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-border/50">
+                                {postScanInsights.violations.slice(0, 100).map((row, idx) => (
+                                  <tr key={`${row.type}-${row.column || "none"}-${idx}`}>
+                                    <td className="px-4 py-2 font-semibold text-rose-700">{row.type}</td>
+                                    <td className="px-4 py-2 text-foreground/80">{row.column || "-"}</td>
+                                    <td className="px-4 py-2 text-foreground/90">{row.message}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border border-border overflow-hidden">
+                        <div className="px-4 py-3 bg-muted/40 border-b border-border flex items-center justify-between">
+                          <span className="text-xs font-black uppercase tracking-[0.12em] text-muted-foreground">
+                            Data Preview
+                          </span>
+                          <span className="text-xs font-semibold text-muted-foreground">
+                            {postScanInsights.previewRows.length} rows
+                          </span>
+                        </div>
+                        <div className="max-h-72 overflow-auto custom-scrollbar">
+                          {postScanInsights.previewRows.length === 0 || postScanInsights.previewColumns.length === 0 ? (
+                            <div className="px-4 py-6 text-sm text-muted-foreground">
+                              No preview rows available for this dataset.
+                            </div>
+                          ) : (
+                            <table className="w-full text-left text-xs">
+                              <thead className="sticky top-0 bg-card">
+                                <tr className="uppercase tracking-[0.08em] text-muted-foreground">
+                                  {postScanInsights.previewColumns.map((col) => (
+                                    <th key={col} className="px-3 py-2 border-b border-border whitespace-nowrap">
+                                      {col}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-border/50">
+                                {postScanInsights.previewRows.map((row, idx) => (
+                                  <tr key={`preview-${idx}`}>
+                                    {postScanInsights.previewColumns.map((col) => (
+                                      <td key={`${idx}-${col}`} className="px-3 py-2 text-foreground/90 whitespace-nowrap">
+                                        {row[col] === null ? (
+                                          <span className="italic text-muted-foreground">null</span>
+                                        ) : (
+                                          String(row[col])
+                                        )}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </>
           )}

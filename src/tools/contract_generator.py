@@ -7,10 +7,11 @@ the platform can still produce YAML when source imports fail.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,7 +30,9 @@ class ContractGenerationResult:
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     command: List[str] = field(default_factory=list)
-    generated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    generated_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -55,10 +58,26 @@ class DataContractGenerator:
         ".parquet": "parquet",
         ".json": "json",
     }
+    DEFAULT_ANOMALY_THRESHOLDS = {
+        "z_score_warning": 2.5,
+        "z_score_critical": 3.0,
+        "quality_score_warn": 80,
+        "quality_score_block": 50,
+    }
+    DEFAULT_SLOS = {
+        "min_quality_score": 80,
+        "max_anomaly_count": 0,
+    }
 
     def __init__(self, cli_binary: str = "datacontract", timeout_seconds: int = 45):
         self.cli_binary = cli_binary
         self.timeout_seconds = timeout_seconds
+        self.include_hard_bounds = os.getenv("DRE_CONTRACT_GENERATOR_HARD_BOUNDS", "0").strip() == "1"
+        self.strict_nullable = os.getenv("DRE_CONTRACT_GENERATOR_STRICT_NULLABLE", "0").strip() == "1"
+        self.harmonize_with_observed_types = os.getenv(
+            "DRE_CONTRACT_GENERATOR_HARMONIZE_TYPES",
+            "1",
+        ).strip() != "0"
 
     def generate_from_source(
         self,
@@ -109,6 +128,13 @@ class DataContractGenerator:
             return None
 
         normalized_yaml, normalize_warning = self._normalize_cli_output(stdout, source_path)
+        normalized_warnings: List[str] = []
+        if self.harmonize_with_observed_types:
+            normalized_yaml, normalized_warnings = self._harmonize_yaml_with_observed_schema(
+                normalized_yaml,
+                source_path=source_path,
+                fmt=fmt,
+            )
 
         payload = ContractGenerationResult(
             yaml_content=normalized_yaml,
@@ -120,6 +146,7 @@ class DataContractGenerator:
 
         if normalize_warning:
             payload.warnings.append(normalize_warning)
+        payload.warnings.extend(normalized_warnings)
         if stderr:
             payload.warnings.append(stderr)
         if result.returncode != 0:
@@ -175,6 +202,7 @@ class DataContractGenerator:
                 errors=[f"Fallback inference failed: {exc}"],
             )
 
+        observed_schema, observed_warnings = self._collect_observed_schema(source_path, inferred_format=source_path.suffix.lower().lstrip("."))
         columns = []
         parquet_type_hints: Dict[str, str] = {}
         parquet_raw_types: Dict[str, str] = {}
@@ -191,22 +219,31 @@ class DataContractGenerator:
 
         for col_name in df.columns:
             dtype = str(df[col_name].dtype)
-            col_type = parquet_type_hints.get(col_name) or self._map_pandas_type(dtype)
+            observed = observed_schema.get(col_name, {})
+            col_type = (
+                str(observed.get("contract_type") or "").strip()
+                or parquet_type_hints.get(col_name)
+                or self._map_pandas_type(dtype)
+            )
+            null_rate = float(observed.get("null_rate", 0.0) or 0.0)
             if col_name in parquet_type_hints and parquet_metadata_source:
                 inferred_desc = (
                     f"Inferred from Parquet metadata ({parquet_metadata_source}): "
                     f"{parquet_raw_types.get(col_name, 'unknown')}"
                 )
+            elif observed.get("raw_type"):
+                inferred_desc = f"Inferred from source schema (duckdb): {observed.get('raw_type')}"
             else:
                 inferred_desc = f"Inferred from source column type: {dtype}"
 
             col_def: Dict[str, Any] = {
                 "name": col_name,
                 "data_type": col_type,
-                "nullable": bool(df[col_name].isnull().any()),
+                # Default to nullable=true unless strict mode is explicitly enabled.
+                "nullable": False if self.strict_nullable and null_rate <= 0.0 else True,
                 "description": inferred_desc,
             }
-            if col_type in {"integer", "double"}:
+            if self.include_hard_bounds and col_type in {"integer", "double"}:
                 numeric = pd.to_numeric(df[col_name], errors="coerce").dropna()
                 if not numeric.empty:
                     col_def["min_value"] = float(numeric.min())
@@ -219,13 +256,30 @@ class DataContractGenerator:
             "id": f"urn:datacontract:{dataset_name}",
             "table_name": dataset_name,
             "description": f"Deterministic fallback contract generated from {source_path.name}",
+            "info": {
+                "title": dataset_name,
+                "owner": "Unassigned",
+                "domain": "Unknown",
+                "lifecycle": "active",
+                "version": "1.0.0",
+            },
             "quality": {
                 "min_rows": 1,
+                "anomaly_thresholds": dict(self.DEFAULT_ANOMALY_THRESHOLDS),
+                "slos": dict(self.DEFAULT_SLOS),
             },
             "columns": columns,
         }
         yaml_content = yaml.safe_dump(contract, sort_keys=False)
         warnings = ["Generated via deterministic fallback."]
+        warnings.extend(observed_warnings)
+        if not self.include_hard_bounds:
+            warnings.append(
+                "No hard min/max constraints were inferred automatically. Add domain constraints manually where needed."
+            )
+        warnings.append(
+            "Semantic rules (for example, valid age range) are intentionally not auto-generated to avoid domain hallucinations."
+        )
         if source_path.suffix.lower() == ".parquet":
             if parquet_metadata_source:
                 warnings.append(
@@ -244,6 +298,138 @@ class DataContractGenerator:
             cli_available=False,
             warnings=warnings,
         )
+
+    def _collect_observed_schema(
+        self,
+        source_path: Path,
+        *,
+        inferred_format: str,
+    ) -> tuple[Dict[str, Dict[str, Any]], List[str]]:
+        """
+        Collect observed type/nullability hints from the source data.
+        Prefers DuckDB type introspection so generated contracts align with schema validation.
+        """
+        observed: Dict[str, Dict[str, Any]] = {}
+        warnings: List[str] = []
+
+        # Type hints via DuckDB DESCRIBE (same engine used by SchemaValidator).
+        try:
+            import duckdb
+
+            conn = duckdb.connect(":memory:")
+            if inferred_format == "parquet":
+                rows = conn.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(source_path)]).fetchall()
+            elif inferred_format == "json":
+                rows = conn.execute("DESCRIBE SELECT * FROM read_json_auto(?)", [str(source_path)]).fetchall()
+            else:
+                rows = conn.execute("DESCRIBE SELECT * FROM read_csv_auto(?)", [str(source_path)]).fetchall()
+            conn.close()
+
+            for row in rows:
+                col_name = str(row[0])
+                raw_type = str(row[1])
+                observed[col_name] = {
+                    "raw_type": raw_type,
+                    "contract_type": self._map_duckdb_type(raw_type),
+                }
+        except Exception as exc:
+            warnings.append(f"DuckDB type introspection unavailable: {exc}")
+
+        # Null-rate hints via Pandas for generic nullable defaults.
+        try:
+            if inferred_format == "parquet":
+                df = pd.read_parquet(source_path)
+            elif inferred_format == "json":
+                df = pd.read_json(source_path)
+            else:
+                df = pd.read_csv(source_path)
+
+            row_count = max(len(df), 1)
+            for col_name in df.columns:
+                series = df[col_name]
+                if pd.api.types.is_string_dtype(series) or series.dtype == "object":
+                    as_text = series.astype("string")
+                    null_mask = as_text.isna() | (as_text.str.strip() == "")
+                    null_rate = float(null_mask.sum()) / float(row_count)
+                else:
+                    null_rate = float(series.isna().sum()) / float(row_count)
+
+                entry = observed.setdefault(str(col_name), {})
+                entry["null_rate"] = round(float(null_rate), 6)
+        except Exception as exc:
+            warnings.append(f"Pandas nullability introspection unavailable: {exc}")
+
+        return observed, warnings
+
+    def _harmonize_yaml_with_observed_schema(
+        self,
+        yaml_content: str,
+        *,
+        source_path: Path,
+        fmt: str,
+    ) -> tuple[str, List[str]]:
+        """
+        Align generated YAML types/nullability with observed source schema.
+        This prevents immediate false BLOCKED runs caused by generator/validator type drift.
+        """
+        parsed = yaml.safe_load(yaml_content) or {}
+        if not isinstance(parsed, dict):
+            return yaml_content, []
+
+        observed, warnings = self._collect_observed_schema(source_path, inferred_format=fmt)
+        columns = parsed.get("columns")
+        if not isinstance(columns, list):
+            return yaml_content, warnings
+
+        changed_types: List[str] = []
+        for col in columns:
+            if not isinstance(col, dict):
+                continue
+            name = str(col.get("name") or "").strip()
+            if not name:
+                continue
+            hint = observed.get(name) or {}
+            observed_type = str(hint.get("contract_type") or "").strip()
+            if observed_type and observed_type != str(col.get("data_type") or "").strip():
+                col["data_type"] = observed_type
+                changed_types.append(name)
+
+            null_rate = float(hint.get("null_rate", 0.0) or 0.0)
+            col["nullable"] = False if self.strict_nullable and null_rate <= 0.0 else True
+
+            # Drop automatically inferred hard bounds unless explicitly requested.
+            if not self.include_hard_bounds:
+                col.pop("min_value", None)
+                col.pop("max_value", None)
+
+        self._ensure_quality_defaults(parsed)
+        if changed_types:
+            warnings.append(
+                "Aligned generated column types with observed source schema for: "
+                + ", ".join(changed_types[:12])
+            )
+        return yaml.safe_dump(parsed, sort_keys=False), warnings
+
+    def _ensure_quality_defaults(self, contract: Dict[str, Any]) -> None:
+        quality = contract.get("quality")
+        if not isinstance(quality, dict):
+            quality = {}
+            contract["quality"] = quality
+        quality.setdefault("min_rows", 1)
+
+        anomaly = quality.get("anomaly_thresholds")
+        if not isinstance(anomaly, dict):
+            anomaly = {}
+            quality["anomaly_thresholds"] = anomaly
+        for key, value in self.DEFAULT_ANOMALY_THRESHOLDS.items():
+            anomaly.setdefault(key, value)
+
+        slos = quality.get("slos")
+        if not isinstance(slos, dict):
+            slos = {}
+            quality["slos"] = slos
+        for key, value in self.DEFAULT_SLOS.items():
+            slos.setdefault(key, value)
 
     def _infer_parquet_types(
         self, source_path: Path
@@ -412,7 +598,14 @@ class DataContractGenerator:
                 if isinstance(logical_opts.get("enum"), list):
                     column["allowed_values"] = logical_opts["enum"]
 
-            if bool(prop.get("unique")) and name.lower().endswith("_id"):
+            # Only keep explicit PK markers from the source model.
+            # Do not infer PK from *_id/unique heuristics; that creates false positives.
+            explicit_pk = (
+                bool(prop.get("primaryKey"))
+                or bool(prop.get("primary_key"))
+                or str(prop.get("logicalType", "")).lower() == "primary_key"
+            )
+            if explicit_pk:
                 column["isPrimaryKey"] = True
 
             columns.append(column)

@@ -1,0 +1,11 @@
+{
+  "python_version": "3.12",
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "agentic_reliability": "./src/workflows/studio_graphs.py:agentic_graph",
+    "hitl_contract": "./src/workflows/studio_graphs.py:hitl_graph"
+  },
+  "env": "./.env"
+}

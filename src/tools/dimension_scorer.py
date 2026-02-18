@@ -14,7 +14,7 @@ Returns weighted aggregate score + per-dimension breakdown for visualization.
 
 from typing import Dict, List, Any, Optional, Union
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 
@@ -212,7 +212,7 @@ class DimensionScorer:
 
         return QualityDimensionReport(
             dataset_name=dataset_name,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             overall_score=overall_score,
             dimensions=dimensions,
             remediation_status=remediation_status
@@ -228,17 +228,30 @@ class DimensionScorer:
         """
         total_checks = 0
         passed_checks = 0
+        failed_checks = 0
         violations = []
 
-        # Schema validation checks
-        if schema_result.get("status") == "pass":
-            passed_checks += schema_result.get("passed_checks", 0)
-            total_checks += schema_result.get("passed_checks", 0)
-        else:
-            total_checks += len(schema_result.get("issues", []))
-            for issue in schema_result.get("issues", []):
-                if issue.get("issue_type") in ["missing_column", "type_mismatch"]:
-                    violations.append(f"{issue['column']}: {issue['message']}")
+        schema_passed = 0
+        try:
+            schema_passed = int(schema_result.get("passed_checks", 0))
+        except Exception:
+            schema_passed = 0
+        if schema_passed > 0:
+            total_checks += schema_passed
+            passed_checks += schema_passed
+
+        # Schema validation checks (Validity-relevant only).
+        # Do not count uniqueness-style schema issues (e.g., duplicate_primary_key) here.
+        schema_issues = schema_result.get("issues", []) if isinstance(schema_result, dict) else []
+        for issue in schema_issues:
+            if not isinstance(issue, dict):
+                continue
+            issue_type = str(issue.get("issue_type") or "")
+            if issue_type not in ["missing_column", "type_mismatch"]:
+                continue
+            total_checks += 1
+            failed_checks += 1
+            violations.append(f"{issue.get('column')}: {issue.get('message')}")
 
         # Pattern and allowed_values violations from profile
         for col_name, col_profile in profile_report.get("column_profiles", {}).items():
@@ -248,14 +261,19 @@ class DimensionScorer:
             pattern_violation = next((v for v in col_violations if "PATTERN" in v), None)
             if pattern_violation:
                 total_checks += 1
+                failed_checks += 1
                 violations.append(f"{col_name}: {pattern_violation}")
 
             # Check for allowed_values violations
             allowed_violation = next((v for v in col_violations if "ALLOWED VALUES" in v), None)
             if allowed_violation:
                 total_checks += 1
+                failed_checks += 1
                 violations.append(f"{col_name}: {allowed_violation}")
 
+        passed_checks = max(0, passed_checks)
+        total_checks = max(total_checks, passed_checks + failed_checks)
+        passed_checks = max(0, total_checks - failed_checks)
         score = (passed_checks / total_checks * 100) if total_checks > 0 else 100.0
         status = "PASS" if score >= 95 else ("WARN" if score >= 80 else "FAIL")
 
@@ -280,15 +298,24 @@ class DimensionScorer:
         passed_checks = 0
         violations = []
 
-        # Null violations
+        # Column-level missingness checks.
+        # Completeness is about presence of values, not only NOT NULL contract failures.
         for col_name, col_profile in profile_report.get("column_profiles", {}).items():
-            for violation in col_profile.get("violations", []):
-                if "NOT NULL" in violation:
-                    total_checks += 1
-                    violations.append(f"{col_name}: {violation}")
-                else:
-                    total_checks += 1
-                    passed_checks += 1
+            total_checks += 1
+            null_rate = float(col_profile.get("null_rate", 0.0) or 0.0)
+            null_count = int(col_profile.get("null_count", 0) or 0)
+            if null_rate <= 0.0:
+                passed_checks += 1
+                continue
+
+            not_null_violation = next(
+                (v for v in col_profile.get("violations", []) if "NOT NULL" in str(v).upper()),
+                None,
+            )
+            if not_null_violation:
+                violations.append(f"{col_name}: {not_null_violation}")
+            else:
+                violations.append(f"{col_name}: {null_count} null values ({null_rate:.1%} null rate)")
 
         # Row count violations
         for constraint in profile_report.get("constraint_violations", []):
@@ -324,19 +351,43 @@ class DimensionScorer:
 
         Sources:
         - DataProfiler: isPrimaryKey violations
+
+        Only columns that carry a primary-key constraint are counted as uniqueness
+        checks.  Counting every non-PK violation as a "passed" uniqueness check
+        was inflating the score when other dimensions (NULL, RANGE) had failures.
         """
         total_checks = 0
         passed_checks = 0
         violations = []
 
         for col_name, col_profile in profile_report.get("column_profiles", {}).items():
-            for violation in col_profile.get("violations", []):
-                if "PRIMARY KEY" in violation or "duplicate" in violation.lower():
+            col_violations = col_profile.get("violations", [])
+            # Only score uniqueness for columns that have PK/duplicate violations
+            pk_violations = [
+                v for v in col_violations
+                if "PRIMARY KEY" in str(v).upper() or "duplicate" in str(v).lower()
+            ]
+            if pk_violations:
+                # This column has a PK constraint — count it as a failed check
+                total_checks += 1
+                for v in pk_violations:
+                    violations.append(f"{col_name}: {v}")
+            elif any("PRIMARY KEY" in str(v).upper() for v in col_violations):
+                # Shouldn't happen but guard against it
+                total_checks += 1
+            else:
+                # Column has no PK constraint — check uniqueness_rate as a soft signal
+                uniqueness_rate = float(col_profile.get("uniqueness_rate", 1.0) or 1.0)
+                total_rows = int(col_profile.get("total_rows", 0) or 0)
+                # Only score columns with enough rows to be meaningful
+                if total_rows >= 2:
                     total_checks += 1
-                    violations.append(f"{col_name}: {violation}")
-                else:
-                    total_checks += 1
-                    passed_checks += 1
+                    if uniqueness_rate >= 0.95:
+                        passed_checks += 1
+                    else:
+                        violations.append(
+                            f"{col_name}: low uniqueness ({uniqueness_rate:.1%})"
+                        )
 
         score = (passed_checks / total_checks * 100) if total_checks > 0 else 100.0
         status = "PASS" if score >= 95 else ("WARN" if score >= 80 else "FAIL")
@@ -356,19 +407,34 @@ class DimensionScorer:
 
         Sources:
         - DataProfiler: min_value/max_value violations, custom_checks
+
+        Only RANGE violations are counted per column — counting every non-RANGE
+        violation as a "passed" accuracy check was inflating the score when other
+        dimensions (NULL, PK) had failures on the same column.
         """
         total_checks = 0
         passed_checks = 0
         violations = []
 
-        # Range violations
+        # Range violations — one check per column that has a range constraint
         for col_name, col_profile in profile_report.get("column_profiles", {}).items():
-            for violation in col_profile.get("violations", []):
-                if "RANGE" in violation:
-                    total_checks += 1
-                    violations.append(f"{col_name}: {violation}")
+            col_violations = col_profile.get("violations", [])
+            range_violations = [v for v in col_violations if "RANGE" in str(v).upper()]
+            # Only score accuracy for columns that actually have range constraints
+            # (i.e., columns where a RANGE violation was either found or could be checked).
+            # We detect this by looking at whether min_value or max_value are present
+            # in the column profile (non-None means a range check was performed).
+            has_range_constraint = (
+                col_profile.get("min_value") is not None
+                or col_profile.get("max_value") is not None
+                or bool(range_violations)
+            )
+            if has_range_constraint:
+                total_checks += 1
+                if range_violations:
+                    for v in range_violations:
+                        violations.append(f"{col_name}: {v}")
                 else:
-                    total_checks += 1
                     passed_checks += 1
 
         # Custom SQL checks

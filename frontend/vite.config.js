@@ -4,4 +4,8 @@ import react from '@vitejs/plugin-react-swc'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  build: {
+    // Legacy dashboard bundle is intentionally large while migration to Next.js completes.
+    chunkSizeWarningLimit: 1500,
+  },
 })

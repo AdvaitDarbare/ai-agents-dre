@@ -1,18 +1,31 @@
 import axios from 'axios';
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const REQUEST_TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS || 15000);
 
 const api = axios.create({
     baseURL: API_BASE_URL,
+    timeout: REQUEST_TIMEOUT_MS,
 });
 
 export const getPulse = () => api.get('/pulse');
 export const getDatasets = () => api.get('/datasets');
-export const deleteDataset = async (name) => {
-  const response = await api.delete(`/datasets/${encodeURIComponent(name)}`);
+export const deleteDataset = async (name, options = {}) => {
+  const query = new URLSearchParams();
+  if (options.policyApproved) query.set('policy_approved', 'true');
+  if (options.policyReason && String(options.policyReason).trim()) {
+    query.set('policy_reason', String(options.policyReason).trim());
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  const response = await api.delete(`/datasets/${encodeURIComponent(name)}${suffix}`);
   return response.data;
 };
 export const evaluateDataset = (name) => api.post(`/evaluate/${name}`);
+export const enqueueEvaluateDataset = (name) =>
+  api.post(`/jobs/evaluate/${encodeURIComponent(name)}`);
+export const enqueueBulkEvaluateDatasets = (datasetNames) =>
+  api.post('/jobs/evaluate-bulk', { dataset_names: datasetNames });
+export const getJobStatus = (jobId) => api.get(`/jobs/${encodeURIComponent(jobId)}`);
 export const getHistory = (name) => api.get(`/history/${name}`);
 export const chatWithCopilot = (query) => api.post('/chat', { query });
 
@@ -57,9 +70,10 @@ export const rejectContract = async (datasetName) => {
 };
 
 // --- AI Contract Modification ---
-export const aiModifyContract = async (datasetName, instruction) => {
+export const aiModifyContract = async (datasetName, instruction, currentYaml) => {
   const response = await api.post(`/contract/${datasetName}/ai-modify`, {
-    instruction
+    instruction,
+    current_yaml: currentYaml,
   });
   return response.data;
 };

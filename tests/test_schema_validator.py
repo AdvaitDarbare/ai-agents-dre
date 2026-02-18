@@ -8,6 +8,7 @@ import pandas as pd
 from pathlib import Path
 import tempfile
 import shutil
+import textwrap
 from src.tools.schema_validator import SchemaValidator
 
 
@@ -23,8 +24,41 @@ class TestSchemaValidator:
     
     @pytest.fixture(scope="class")
     def contract_path(self):
-        """Path to the transactions ODCS contract."""
-        return Path("config/expectations/transactions.yaml")
+        """Create a minimal transactions ODCS contract for this test run."""
+        temp_path = Path(tempfile.mkdtemp())
+        contract_path = temp_path / "transactions.yaml"
+        contract_path.write_text(
+            textwrap.dedent(
+                """
+                kind: DataContract
+                apiVersion: v3.1.0
+                id: transactions-test
+                table_name: transactions
+                columns:
+                - name: transaction_id
+                  data_type: varchar
+                  nullable: false
+                  isPrimaryKey: true
+                - name: user_id
+                  data_type: varchar
+                  nullable: false
+                - name: amount
+                  data_type: float
+                  nullable: false
+                - name: timestamp
+                  data_type: timestamp
+                  nullable: false
+                - name: status
+                  data_type: varchar
+                  nullable: false
+                """
+            ).strip()
+            + "\n"
+        )
+        try:
+            yield contract_path
+        finally:
+            shutil.rmtree(temp_path)
     
     def _create_csv(self, temp_dir: Path, filename: str, columns: list, data: list) -> Path:
         """Helper to create CSV files for testing."""

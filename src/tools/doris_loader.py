@@ -13,10 +13,15 @@ Key Features:
 import os
 import uuid
 import json
-import base64
 import requests
 import pandas as pd
-from typing import Dict, Any, Optional
+from typing import Dict, Any
+from urllib.parse import urlparse, urlunparse
+
+try:
+    import pymysql  # type: ignore
+except Exception:  # pragma: no cover
+    pymysql = None
 
 class DorisLoader:
     """
@@ -33,6 +38,110 @@ class DorisLoader:
         self.password = os.getenv("DORIS_PASSWORD", "")
         self.db = os.getenv("DORIS_DB", "test_db")
         self.mock_mode = os.getenv("DORIS_MOCK_MODE", "False").lower() == "true"
+        self.query_port = int(os.getenv("DORIS_FE_QUERY_PORT", "9030"))
+        self.auto_create_table = os.getenv("DORIS_AUTO_CREATE_TABLE", "0").strip() in {"1", "true", "True"}
+        self.redirect_host = os.getenv("DORIS_STREAM_LOAD_REDIRECT_HOST", "").strip()
+        self.redirect_port = os.getenv("DORIS_STREAM_LOAD_REDIRECT_PORT", "").strip()
+
+    @staticmethod
+    def _is_private_ipv4(hostname: str) -> bool:
+        if not hostname:
+            return False
+        return (
+            hostname.startswith("10.")
+            or hostname.startswith("192.168.")
+            or hostname.startswith("172.")
+        )
+
+    def _resolve_redirect_url(self, location: str) -> str:
+        parsed = urlparse(location)
+        if not parsed.hostname:
+            return location
+
+        target_host = parsed.hostname
+        target_port = parsed.port
+
+        if self.redirect_host:
+            target_host = self.redirect_host
+            if self.redirect_port:
+                target_port = int(self.redirect_port)
+        elif self.host in {"127.0.0.1", "localhost"} and self._is_private_ipv4(parsed.hostname):
+            # Local dockerized Doris often redirects to private bridge IPs that are not host-routable.
+            target_host = self.host
+
+        if target_port is None:
+            return location
+
+        rewritten = parsed._replace(netloc=f"{target_host}:{target_port}")
+        return urlunparse(rewritten)
+
+    @staticmethod
+    def _map_dtype(dtype: Any) -> str:
+        if pd.api.types.is_integer_dtype(dtype):
+            return "BIGINT"
+        if pd.api.types.is_float_dtype(dtype):
+            return "DOUBLE"
+        if pd.api.types.is_bool_dtype(dtype):
+            return "BOOLEAN"
+        if pd.api.types.is_datetime64_any_dtype(dtype):
+            return "DATETIME"
+        # Doris rejects STRING type for key columns; VARCHAR works for ids and dimensions.
+        return "VARCHAR(255)"
+
+    @staticmethod
+    def _safe_identifier(name: str) -> str:
+        return "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(name))
+
+    def _ensure_table(self, df: pd.DataFrame, table_name: str) -> None:
+        if pymysql is None:
+            raise Exception(
+                "DORIS_AUTO_CREATE_TABLE requires PyMySQL. Install with `pip install pymysql`."
+            )
+        if df is None or len(df.columns) == 0:
+            raise Exception("Cannot auto-create Doris table from empty dataframe.")
+
+        safe_table = self._safe_identifier(table_name)
+        safe_db = self._safe_identifier(self.db)
+        column_defs = []
+        for col in df.columns:
+            safe_col = self._safe_identifier(str(col))
+            doris_type = self._map_dtype(df[col].dtype)
+            column_defs.append(f"`{safe_col}` {doris_type} NULL")
+
+        preferred_key = None
+        for candidate in df.columns:
+            lowered = str(candidate).lower()
+            if lowered == "id" or lowered.endswith("_id"):
+                preferred_key = str(candidate)
+                break
+        if preferred_key is None:
+            preferred_key = str(df.columns[0])
+        safe_key = self._safe_identifier(preferred_key)
+
+        create_sql = f"""
+        CREATE TABLE IF NOT EXISTS `{safe_db}`.`{safe_table}` (
+            {", ".join(column_defs)}
+        )
+        DUPLICATE KEY(`{safe_key}`)
+        DISTRIBUTED BY HASH(`{safe_key}`) BUCKETS 1
+        PROPERTIES ("replication_num" = "1")
+        """
+
+        conn = pymysql.connect(
+            host=self.host,
+            port=self.query_port,
+            user=self.user,
+            password=self.password,
+            database="information_schema",
+            connect_timeout=5,
+            autocommit=True,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"CREATE DATABASE IF NOT EXISTS `{safe_db}`")
+                cur.execute(create_sql)
+        finally:
+            conn.close()
 
     def load_data(self, df: pd.DataFrame, table_name: str) -> Dict[str, Any]:
         """
@@ -48,26 +157,34 @@ class DorisLoader:
         if self.mock_mode:
             print(f"🔧 [Mock Mode] Simulating load of {len(df)} rows into '{self.db}.{table_name}'...")
             return {
+                "success": True,
                 "Status": "Success",
                 "Message": "Mock load successful",
                 "NumberTotalRows": len(df),
                 "NumberLoadedRows": len(df),
                 "LoadUrl": "http://mock-doris/api/_stream_load"
             }
+
+        safe_table = self._safe_identifier(table_name)
+        if self.auto_create_table:
+            self._ensure_table(df=df, table_name=safe_table)
             
         # Prepare Data
         # Convert to CSV string without header and index
         csv_data = df.to_csv(index=False, header=False)
         
         # Prepare Request
-        load_url = f"http://{self.host}:{self.port}/api/{self.db}/{table_name}/_stream_load"
+        load_url = f"http://{self.host}:{self.port}/api/{self.db}/{safe_table}/_stream_load"
         label = f"label_{uuid.uuid4()}"
+        safe_columns = [self._safe_identifier(str(col)) for col in df.columns]
         
         headers = {
             "Expect": "100-continue",
             "label": label,
             "column_separator": ",",
-            "format": "csv"
+            "format": "csv",
+            "columns": ",".join(safe_columns),
+            "strict_mode": os.getenv("DORIS_STREAM_LOAD_STRICT_MODE", "false"),
             # Add other headers like 'columns' if mapping is needed
         }
         
@@ -80,8 +197,24 @@ class DorisLoader:
                 load_url,
                 data=csv_data,
                 headers=headers,
-                auth=auth
+                auth=auth,
+                allow_redirects=False,
+                timeout=float(os.getenv("DORIS_STREAM_LOAD_TIMEOUT_SECONDS", "30")),
             )
+
+            if response.status_code in {301, 302, 307, 308}:
+                location = response.headers.get("Location") or response.headers.get("location")
+                if not location:
+                    raise Exception("Doris returned redirect without Location header.")
+                redirect_url = self._resolve_redirect_url(location)
+                response = requests.put(
+                    redirect_url,
+                    data=csv_data,
+                    headers=headers,
+                    auth=auth,
+                    allow_redirects=False,
+                    timeout=float(os.getenv("DORIS_STREAM_LOAD_TIMEOUT_SECONDS", "30")),
+                )
             
             # Check HTTP Status
             response.raise_for_status()
@@ -96,6 +229,7 @@ class DorisLoader:
                     error_msg += f" (Check: {error_url})"
                 raise Exception(error_msg)
                 
+            resp_dict["success"] = True
             print(f"✅ Load Successful! Label: {resp_dict.get('Label')}")
             return resp_dict
             
