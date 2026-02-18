@@ -2,38 +2,52 @@
 
 Last updated: 2026-02-18
 
-## System Overview
+## System Architecture Overview
 
-```text
-Data File (CSV/Parquet/JSON)
-      |
-      v
-File Watcher / API Trigger
-      |
-      v
-Reliability Service / LangGraph HITL Workflow / Async Job Worker
-      |
-      +--> Unified dispatch (`run_for_file`)
-      |      - contract exists: staged evaluate graph
-      |          * `evaluate_pipeline` (MonitorAgent pipeline execution)
-      |          * `persist_verdict` (writes `.verdict.json`)
-      |          * `apply_file_actions` (optional quarantine routing)
-      |      - contract missing: proposal + HITL interrupt/resume
-      |
-      +--> Contract missing: durable HITL state in PostgreSQL checkpoint (PostgresSaver)
-      |
-      +--> Contract exists: MonitorAgent.evaluate_data_file()
-              |
-              +--> Stage A   SchemaValidator (Pydantic/DuckDB alignment)
-              +--> Stage A2  DataProfiler (In-memory aggregate metrics)
-              +--> Stage A3  DimensionScorer (6D weighted quality framework)
-              +--> Stage B   AnomalyDetector (Multi-detector: z-score, robust MAD, IQR)
-              +--> Stage C   Forced Load / Automated Routing decision
-              +--> Stage D   Persist outcomes (History, Metrics, Baselines, SLOs)
-              +--> Stage E   LLM explanation/advice (Agno + OpenAI)
-      |
-      +--> Backtesting harness (`/backtesting/{dataset}`) for FP/FN tuning & precision recall
+```mermaid
+graph LR
+    subgraph "Ingestion & Events"
+        Watcher[File Watcher]
+        API[FastAPI API]
+    end
+
+    subgraph "Orchestration & State"
+        RelService[Reliability Service]
+        AsyncJobs[Async Job Service]
+        Postgres[(PostgreSQL 16)]
+        LangGraph[LangGraph Workflows]
+    end
+
+    subgraph "Intelligence & Reasoning"
+        Agno[Agno Reasoning Engine]
+        LLM[OpenAI GPT-4o]
+    end
+
+    subgraph "Data & Analytics"
+        DuckDB[DuckDB In-Memory]
+        Doris[Apache Doris Warehouse]
+    end
+
+    Watcher --> RelService
+    API --> RelService
+    RelService --> AsyncJobs
+    AsyncJobs --> Postgres
+    RelService --> LangGraph
+    LangGraph --> Postgres
+    RelService --> DuckDB
+    RelService --> Agno
+    Agno --> LLM
+    RelService --> Doris
 ```
+
+### Evaluation Pipeline Flow (Stage Detail)
+1. **Stage A (Schema)**: Pydantic/DuckDB alignment.
+2. **Stage A2 (Profile)**: In-memory aggregate metrics.
+3. **Stage A3 (Score)**: 6D weighted quality framework.
+4. **Stage B (Anomaly)**: Multi-detector: z-score, robust MAD, IQR.
+5. **Stage C (Decision)**: Forced Load / Automated Routing.
+6. **Stage D (Persistence)**: Outcomes (History, Metrics, Baselines, SLOs).
+7. **Stage E (Reasoning)**: LLM explanation/advice via Agno.
 
 ## Core Runtime Components
 

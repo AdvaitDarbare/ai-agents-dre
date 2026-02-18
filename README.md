@@ -4,6 +4,56 @@ An agentic data reliability control plane for local-first and enterprise data wo
 
 It validates incoming datasets against contracts, detects anomalies using statistical baselines, evaluates SLOs, and routes data through active/pending/quarantine flows with **Human-in-the-Loop (HITL)** and **Agentic Remediation** controls.
 
+### Ingestion + Evaluation Flow
+
+```mermaid
+graph TD
+    A[File Lands in Landing Zone] --> B{Contract Exists?}
+    B -- No --> C[Move to Pending Approval]
+    C --> D[Generate AI Contract Proposal]
+    D --> E[Human Review/Approval]
+    E --> F[Save Contract]
+    F --> G[Run Full Evaluation]
+    B -- Yes --> G
+    G --> H[Stage A: Schema Validation]
+    H --> I[Stage B: Anomaly Detection]
+    I --> J[Stage C: Routing Decision]
+    J -- Passed/Forced --> K[Load to Doris]
+    J -- Failed --> L[Quarantine/Incident]
+    K --> M[Persist Run & Metrics]
+    L --> M
+    M --> N[Stage E: AI Reasoning / Advice]
+```
+
+1. File lands in `data/landing`
+2. File watcher resolves dataset name
+3. Unified workflow dispatch:
+   - If contract exists: run full evaluation pipeline
+   - If no contract: move to `data/pending_approval`, generate proposal in `config/proposals`
+4. On approval: save contract and validate pending files automatically
+5. Persist runs, metrics, baselines, SLO checks, and verdict logs
+6. Contract-missing path is durable via LangGraph interrupt/resume + PostgreSQL checkpointer
+
+## Current Progress (What we did so far)
+
+- **Next.js 15 Dashboard**: Full migration from legacy Vite to a production-grade, data-dense operations UI.
+- **Durable HITL Pipelines**: Rebuilt ingestion and approval flows using **LangGraph** for resilient state management.
+- **Enterprise Persistence**: Integrated PostgreSQL 16 as the unified store for runs, incidents, and audit logs.
+- **Refined Reliability Engine**: Multi-stage detection (Schema, Profiling, Anomaly, Scoring) with 3 concurrent statistical models.
+- **Modern Governance**: Integrated **RBAC** and a **Policy Engine** to gate destructive actions and enforce human-in-the-loop controls.
+- **Manual "Force Load"**: Implemented emergency ingestion bypass with full audit prefixing.
+- **MCP Integration**: Exposed the entire toolset via **Model Context Protocol** for direct use in AI-assisted workflows.
+
+## Roadmap (Future stuff)
+
+- **Git-Backed Contracts**: Moving from local YAMLs to full Git-based versioning for data contract evolution.
+- **Advanced Data Connectors**: Native ingestion support for S3, Snowflake, BigQuery, and Delta Lake.
+- **Auto-Pilot Remediation**: Autonomous self-healing for low-risk schema and quality failures.
+- **Column-Level Lineage**: Deep impact analysis at the field level to pinpoint exactly which downstream dashboards are at risk.
+- **Custom Anomaly Models**: Support for importing user-defined Python models or Prophet-based forecasting into the pipeline.
+- **Multi-Tenant Workspaces**: Organizing datasets and incidents by teams/projects with granular access controls.
+- **Mobile-First UI**: Dedicated mobile experience for on-the-go incident acknowledgment and status checks.
+
 ## Key Capabilities
 
 - **Unified Data Reliability Pipeline**
